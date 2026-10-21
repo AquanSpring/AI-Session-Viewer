@@ -8,6 +8,28 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/), and this
 
 ---
 
+## [3.1.0] - 2026-10-21
+
+### Added
+
+- **会话迁移（跨机导出 / 导入）**：侧栏「工具与管理 → 会话迁移」。
+  - **导出**：勾选数据源（Claude / Codex / Grok / Oh My Pi），每个来源可选全部项目或指定项目，打包成一个 `.zip`。包内为原始会话文件——Claude 的子代理与工具结果目录、项目 memory、`sessions-index.json`；Codex 的 rollout（含归档会话）、`state_5.sqlite` 中对应的 `threads` 记录与 `session_index.jsonl` 会话名——以及本应用的别名、标签和收藏。
+  - **导入**：先预览每个项目的会话数、本机已存在的会话、原项目路径在本机是否存在。可把项目映射到本机其他目录，会话中记录的工作目录（`cwd`，含子代理 worktree 路径与 Codex 数据库中的 verbatim 路径）随之改写，Claude 项目目录名按新路径重新编码，以便在本机续聊；消息正文不改动，文件修改时间保留。
+  - **冲突**：同一会话已存在时默认跳过；选择覆盖时本机原文件先移入 `~/.claude-code-viewer/transfer/backups/<时间戳>/`，Codex 线程记录原地更新，不产生重复行。
+  - **大文件**：逐文件流式读写，GB 级数据不占满内存；导出与导入为后台任务，显示进度并可随时取消，取消前已导入的会话保留。
+  - **Web 端**：上传与下载均为流式（不受 100MB 请求体限制），下载使用一次性票据鉴权；服务器上的临时上传与导出文件超过 24 小时自动清理。桌面端连接远程节点时下载交给系统浏览器。
+
+### Security
+
+- 导入前校验归档清单中的每个路径：拒绝绝对路径、`..`、盘符、反斜杠与链接，写入位置限定在各数据源目录内；Codex 只接受 `sessions/` / `archived_sessions/` 下的 `rollout-*.jsonl`。逐文件校验大小，单个会话写入失败会回滚，不影响其他会话。
+
+### Notes
+
+- 原机器上 Codex Desktop 的项目分组 / 侧栏分区在新机器不存在时，导入的线程会被保留但不归入分组。
+- 含加密推理内容的 Codex 会话，换账号或 provider 后续聊仍可能报 `invalid_encrypted_content`。
+
+---
+
 ## [3.0.0] - 2026-09-30
 
 本版本包含 Web 服务默认配置与应用内续聊范围的**不兼容变更**，升级前请阅读「Breaking」。
