@@ -30,6 +30,12 @@ import type {
   RestoreOptions,
   RestoreResult,
 } from "../types/providerSync";
+import type {
+  TransferExportRequest,
+  TransferImportOptions,
+  TransferJob,
+  TransferPreview,
+} from "../types/transfer";
 import { getApiBaseUrl, getApiToken } from "./nodeConfig";
 
 function getToken(): string | null {
@@ -390,6 +396,107 @@ export async function writeExportFile(_path: string, _content: string): Promise<
 
 export async function getScanProgress(): Promise<ScanProgress> {
   return apiFetch<ScanProgress>("/api/scan-progress");
+}
+
+// Session archive transfer. In web mode an archive "handle" is the id of an
+// upload stored on the server; finished exports are downloaded from there.
+export async function startTransferExport(
+  request: TransferExportRequest,
+  _outputPath: string | null,
+): Promise<string> {
+  const { jobId } = await apiPost<{ jobId: string }>("/api/transfer/export", request);
+  return jobId;
+}
+
+export async function getTransferJob(jobId: string): Promise<TransferJob> {
+  return apiFetch<TransferJob>(`/api/transfer/jobs/${encodeURIComponent(jobId)}`);
+}
+
+export async function cancelTransferJob(jobId: string): Promise<void> {
+  await apiPost(`/api/transfer/jobs/${encodeURIComponent(jobId)}/cancel`, {});
+}
+
+/** Let the browser stream the archive straight to disk (no Blob in memory). */
+export async function downloadTransferExport(jobId: string, fileName: string): Promise<void> {
+  const url = new URL(
+    `/api/transfer/exports/${encodeURIComponent(jobId)}/download`,
+    getApiBaseUrl(),
+  );
+  url.searchParams.set("name", fileName);
+  if (getToken()) {
+    const ticket = await fetchWebSocketTicket();
+    if (ticket) url.searchParams.set("ticket", ticket);
+  }
+  if (__IS_TAURI__) {
+    // Desktop app on a remote node: the webview does not save downloads.
+    const { open } = await import("@tauri-apps/plugin-shell");
+    await open(url.toString());
+    return;
+  }
+  const a = document.createElement("a");
+  a.href = url.toString();
+  a.download = fileName;
+  document.body.appendChild(a);
+  a.click();
+  a.remove();
+}
+
+/** Upload with progress (fetch cannot report upload progress). */
+export async function prepareTransferArchive(
+  archive: File | string,
+  onProgress?: (loaded: number, total: number) => void,
+): Promise<string> {
+  if (typeof archive === "string") {
+    throw new Error(t("Web 模式导入需要选择文件"));
+  }
+  const send = () =>
+    new Promise<{ status: number; body: string }>((resolve, reject) => {
+      const xhr = new XMLHttpRequest();
+      xhr.open("POST", new URL("/api/transfer/uploads", getApiBaseUrl()).toString());
+      for (const [key, value] of Object.entries(
+        applyAuthHeader({ "Content-Type": "application/octet-stream" }),
+      )) {
+        xhr.setRequestHeader(key, value);
+      }
+      xhr.upload.onprogress = (event) => {
+        if (event.lengthComputable) onProgress?.(event.loaded, event.total);
+      };
+      xhr.onload = () => resolve({ status: xhr.status, body: xhr.responseText });
+      xhr.onerror = () => reject(new Error(t("上传失败，请检查网络连接")));
+      xhr.send(archive);
+    });
+
+  let result = await send();
+  if (result.status === 401) {
+    notifyAuthRequired();
+    if (await awaitAuthRestoration()) result = await send();
+  }
+  if (result.status === 401) throw new Error("Authentication required");
+  if (result.status < 200 || result.status >= 300) {
+    throw new Error(result.body || `HTTP ${result.status}`);
+  }
+  return (JSON.parse(result.body) as { uploadId: string }).uploadId;
+}
+
+export async function discardTransferArchive(handle: string): Promise<void> {
+  await apiDelete(`/api/transfer/uploads/${encodeURIComponent(handle)}`);
+}
+
+export async function inspectTransferArchive(handle: string): Promise<TransferPreview> {
+  return apiFetch<TransferPreview>(
+    `/api/transfer/uploads/${encodeURIComponent(handle)}/preview`,
+  );
+}
+
+export async function startTransferImport(
+  handle: string,
+  options: TransferImportOptions,
+): Promise<string> {
+  const { jobId } = await apiPost<{ jobId: string }>("/api/transfer/import", {
+    uploadId: handle,
+    options,
+  });
+  return jobId;
 }
 
 // Skills API

@@ -53,6 +53,10 @@ const ProviderSyncPage = lazy(async () => {
   const module = await import("./components/provider-sync/ProviderSyncPage");
   return { default: module.ProviderSyncPage };
 });
+const TransferPage = lazy(async () => {
+  const module = await import("./components/transfer/TransferPage");
+  return { default: module.TransferPage };
+});
 const SettingsPage = lazy(async () => {
   const module = await import("./components/settings/SettingsPage");
   return { default: module.SettingsPage };
@@ -176,6 +180,14 @@ function App() {
           element={
             <LazyRoute>
               <ProviderSyncPage />
+            </LazyRoute>
+          }
+        />
+        <Route
+          path="/transfer"
+          element={
+            <LazyRoute>
+              <TransferPage />
             </LazyRoute>
           }
         />

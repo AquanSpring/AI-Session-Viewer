@@ -13,4 +13,5 @@ pub mod skills;
 pub mod stats;
 pub mod terminal;
 pub mod trajectory;
+pub mod transfer;
 pub mod updater;

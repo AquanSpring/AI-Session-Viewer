@@ -193,6 +193,203 @@ pub fn clone_thread(
     Ok(true)
 }
 
+fn thread_columns(conn: &Connection) -> Result<Vec<String>, String> {
+    let mut stmt = conn
+        .prepare("PRAGMA table_info(\"threads\")")
+        .map_err(|e| e.to_string())?;
+    let rows = stmt
+        .query_map([], |row| row.get::<_, String>(1))
+        .map_err(|e| e.to_string())?;
+    Ok(rows.flatten().collect())
+}
+
+fn sql_to_json(value: SqlValue) -> serde_json::Value {
+    match value {
+        SqlValue::Null => serde_json::Value::Null,
+        SqlValue::Integer(n) => n.into(),
+        SqlValue::Real(f) => f.into(),
+        SqlValue::Text(s) => s.into(),
+        SqlValue::Blob(bytes) => {
+            let hex: String = bytes.iter().map(|b| format!("{b:02x}")).collect();
+            serde_json::json!({ "$blob": hex })
+        }
+    }
+}
+
+fn json_to_sql(value: &serde_json::Value) -> SqlValue {
+    match value {
+        serde_json::Value::Null => SqlValue::Null,
+        serde_json::Value::Bool(b) => SqlValue::Integer(i64::from(*b)),
+        serde_json::Value::Number(n) => n
+            .as_i64()
+            .map(SqlValue::Integer)
+            .or_else(|| n.as_f64().map(SqlValue::Real))
+            .unwrap_or(SqlValue::Null),
+        serde_json::Value::String(s) => SqlValue::Text(s.clone()),
+        serde_json::Value::Object(map) => match map.get("$blob").and_then(|v| v.as_str()) {
+            Some(hex) => SqlValue::Blob(
+                (0..hex.len() / 2)
+                    .filter_map(|i| u8::from_str_radix(hex.get(i * 2..i * 2 + 2)?, 16).ok())
+                    .collect(),
+            ),
+            None => SqlValue::Text(value.to_string()),
+        },
+        serde_json::Value::Array(_) => SqlValue::Text(value.to_string()),
+    }
+}
+
+/// Read the `threads` rows of `ids` as column → JSON maps, for session
+/// export. Missing ids are skipped; blobs become `{"$blob": "<hex>"}`.
+pub fn export_thread_rows(
+    path: &Path,
+    ids: &[String],
+) -> Result<Vec<serde_json::Map<String, serde_json::Value>>, String> {
+    let conn = open_read(path)?;
+    if !table_exists(&conn, "threads") {
+        return Ok(Vec::new());
+    }
+    let cols = thread_columns(&conn)?;
+    let mut stmt = conn
+        .prepare("SELECT * FROM threads WHERE id = ?1")
+        .map_err(|e| e.to_string())?;
+    let mut out = Vec::new();
+    for id in ids {
+        let row = stmt
+            .query_row(params![id], |row| {
+                let mut map = serde_json::Map::new();
+                for (i, col) in cols.iter().enumerate() {
+                    map.insert(col.clone(), sql_to_json(row.get::<_, SqlValue>(i)?));
+                }
+                Ok(map)
+            })
+            .optional()
+            .map_err(|e| format!("read thread {id}: {e}"))?;
+        out.extend(row);
+    }
+    Ok(out)
+}
+
+/// A `threads` row from an archive plus the location it gets on this machine.
+pub struct ImportedThread {
+    pub row: serde_json::Map<String, serde_json::Value>,
+    pub rollout_path: String,
+    pub cwd: Option<String>,
+}
+
+/// Insert archived `threads` rows in one transaction so Codex lists the
+/// imported rollouts. Only columns the local schema knows are written; with
+/// `replace`, a row with the same id is overwritten, otherwise kept. Returns
+/// `(written, failures)`; `(0, [])` if Codex has no state database yet. A row
+/// the local schema rejects (e.g. a newer NOT NULL column) only fails itself.
+///
+/// Foreign keys (Codex Desktop projects / sections) point at rows of the
+/// exporting machine; references that do not exist here are cleared so the
+/// thread is still listed, just unfiled. Overwrites use an upsert rather than
+/// `REPLACE`, which would delete the row and fire `ON DELETE` actions.
+pub fn import_thread_rows(
+    path: &Path,
+    threads: &[ImportedThread],
+    replace: bool,
+) -> Result<(usize, Vec<String>), String> {
+    if threads.is_empty() || !path.is_file() {
+        return Ok((0, Vec::new()));
+    }
+    let mut conn = open_write(path)?;
+    if !table_exists(&conn, "threads") {
+        return Ok((0, Vec::new()));
+    }
+    let cols = thread_columns(&conn)?;
+    let foreign_keys = thread_foreign_keys(&conn);
+    let tx = conn.transaction().map_err(|e| e.to_string())?;
+    let (mut written, mut failures) = (0, Vec::new());
+    for thread in threads {
+        let mut names = Vec::new();
+        let mut values = Vec::new();
+        for col in &cols {
+            let mut value = match col.as_str() {
+                "rollout_path" => SqlValue::Text(thread.rollout_path.clone()),
+                "cwd" if thread.cwd.is_some() => SqlValue::Text(thread.cwd.clone().unwrap_or_default()),
+                _ => match thread.row.get(col) {
+                    Some(value) => json_to_sql(value),
+                    None => continue, // let the local default apply
+                },
+            };
+            if let Some((table, to)) = foreign_keys.get(col) {
+                if value != SqlValue::Null && !row_exists(&tx, table, to, &value) {
+                    value = SqlValue::Null;
+                }
+            }
+            names.push(format!("\"{}\"", col));
+            values.push(value);
+        }
+        if !names.iter().any(|name| name == "\"id\"") {
+            continue;
+        }
+        let placeholders = (1..=values.len())
+            .map(|i| format!("?{i}"))
+            .collect::<Vec<_>>()
+            .join(", ");
+        let sql = if replace {
+            let updates = names
+                .iter()
+                .filter(|name| *name != "\"id\"")
+                .map(|name| format!("{name} = excluded.{name}"))
+                .collect::<Vec<_>>()
+                .join(", ");
+            format!(
+                "INSERT INTO threads ({}) VALUES ({placeholders}) ON CONFLICT(id) DO UPDATE SET {updates}",
+                names.join(", ")
+            )
+        } else {
+            format!(
+                "INSERT OR IGNORE INTO threads ({}) VALUES ({placeholders})",
+                names.join(", ")
+            )
+        };
+        match tx.execute(&sql, params_from_iter(values.iter())) {
+            Ok(rows) => written += rows,
+            Err(e) => failures.push(e.to_string()),
+        }
+    }
+    tx.commit().map_err(|e| e.to_string())?;
+    Ok((written, failures))
+}
+
+/// `column → (parent table, parent column)` for the foreign keys of `threads`.
+fn thread_foreign_keys(conn: &Connection) -> HashMap<String, (String, String)> {
+    let Ok(mut stmt) = conn.prepare("PRAGMA foreign_key_list(\"threads\")") else {
+        return HashMap::new();
+    };
+    let rows = stmt.query_map([], |row| {
+        Ok((
+            row.get::<_, String>(3)?,
+            (row.get::<_, String>(2)?, row.get::<_, Option<String>>(4)?),
+        ))
+    });
+    let Ok(rows) = rows else {
+        return HashMap::new();
+    };
+    rows.flatten()
+        .map(|(from, (table, to))| (from, (table, to.unwrap_or_else(|| "rowid".to_string()))))
+        .collect()
+}
+
+fn row_exists(conn: &Connection, table: &str, column: &str, value: &SqlValue) -> bool {
+    if !table_exists(conn, table) {
+        return false;
+    }
+    let sql = format!(
+        "SELECT 1 FROM \"{}\" WHERE \"{}\" = ?1 LIMIT 1",
+        table.replace('"', "\"\""),
+        column.replace('"', "\"\"")
+    );
+    conn.query_row(&sql, params![value], |_| Ok(()))
+        .optional()
+        .ok()
+        .flatten()
+        .is_some()
+}
+
 fn open_read(path: &Path) -> Result<Connection, String> {
     let conn = Connection::open_with_flags(
         path,

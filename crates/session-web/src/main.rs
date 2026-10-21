@@ -476,6 +476,31 @@ Set --token / ASV_TOKEN, bind to 127.0.0.1, or pass --allow-no-auth to override.
             "/api/provider-sync/prune",
             post(routes::provider_sync::prune_backups),
         )
+        .route("/api/transfer/export", post(routes::transfer::start_export))
+        .route("/api/transfer/jobs/{id}", get(routes::transfer::job_status))
+        .route(
+            "/api/transfer/jobs/{id}/cancel",
+            post(routes::transfer::cancel_job),
+        )
+        .route(
+            "/api/transfer/exports/{id}",
+            delete(routes::transfer::delete_export),
+        )
+        // Session archives are streamed to disk and may be many gigabytes.
+        .route(
+            "/api/transfer/uploads",
+            post(routes::transfer::upload_archive)
+                .layer(axum::extract::DefaultBodyLimit::disable()),
+        )
+        .route(
+            "/api/transfer/uploads/{id}",
+            delete(routes::transfer::delete_upload),
+        )
+        .route(
+            "/api/transfer/uploads/{id}/preview",
+            get(routes::transfer::preview_upload),
+        )
+        .route("/api/transfer/import", post(routes::transfer::start_import))
         // Single-use ticket endpoint — must be authenticated with the
         // standard Bearer header. Used by browsers to upgrade to WebSocket
         // without leaking the long-lived token through the URL.
@@ -492,6 +517,13 @@ Set --token / ASV_TOKEN, bind to 127.0.0.1, or pass --allow-no-auth to override.
     // Chat WebSocket route (no state needed, stateless per connection)
     let chat_ws_routes = Router::new().route("/ws/chat", get(chat_ws_auth_handler));
 
+    // Archive download is a plain browser navigation: authenticated by a
+    // single-use ticket in the query (checked in the handler), like `/ws`.
+    let download_routes = Router::new().route(
+        "/api/transfer/exports/{id}/download",
+        get(routes::transfer::download_export),
+    );
+
     // CLI detection + models + config route (with auth)
     let cli_routes = Router::new()
         .route("/api/cli/detect", get(detect_cli_handler))
@@ -507,6 +539,7 @@ Set --token / ASV_TOKEN, bind to 127.0.0.1, or pass --allow-no-auth to override.
         .merge(cli_routes)
         .merge(ws_routes)
         .merge(chat_ws_routes)
+        .merge(download_routes)
         .merge(static_routes)
         .layer(cors_layer(Arc::clone(&allowed_origins.0)))
         .layer(axum::Extension(app_token))

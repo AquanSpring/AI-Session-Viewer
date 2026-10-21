@@ -86,6 +86,14 @@ After changing providers, old rollouts and SQLite metadata may still reference t
 
 Changes are backed up to `~/.codex/backups_state/provider-sync/`; restoration can select configuration, database, sessions, and global state separately. Encrypted history may still fail to resume across providers with `invalid_encrypted_content`. Use the original provider when reliable resume is required.
 
+## Session transfer
+
+Tools → Session transfer moves sessions between computers. Export selected sources (all projects or chosen ones) into one `.zip` containing the original session files, sub-agent and tool-result directories, Claude project memory and index, Codex `threads` rows and thread names, plus Viewer aliases, tags, and bookmarks. Files are streamed, so multi-gigabyte exports do not need much memory.
+
+Importing first shows a preview: sessions per project, sessions that already exist here, and whether the original project path exists. A project can be mapped to a different local directory; recorded working directories (`cwd`) are rewritten so sessions can be continued locally, while message text is left untouched. Existing sessions are skipped by default; overwriting moves the local copy to `~/.claude-code-viewer/transfer/backups/` first. Archive paths are validated before anything is written, and a failed session is rolled back.
+
+Sessions may contain code, command output, and secrets, so keep exports safe. Encrypted Codex history may fail to resume under a different account or provider.
+
 ## Updates and file watching
 
 Installed desktop packages use the in-app updater. Windows portable packages link to GitHub Releases. Updates can be checked in Settings, and individual versions can be skipped.

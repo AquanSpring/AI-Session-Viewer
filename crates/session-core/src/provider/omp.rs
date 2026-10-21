@@ -227,7 +227,7 @@ fn session_files_in(root: &Path) -> Vec<PathBuf> {
     files
 }
 
-fn session_files() -> Vec<PathBuf> {
+pub(crate) fn session_files() -> Vec<PathBuf> {
     get_sessions_dir()
         .as_deref()
         .map(session_files_in)

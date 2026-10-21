@@ -107,6 +107,32 @@ pub fn add_bookmark(bookmark: Bookmark) -> Result<Bookmark, String> {
     Ok(bm)
 }
 
+/// Append bookmarks carried over from another machine, skipping ones that
+/// already exist (same id, or same session + message). Returns how many were added.
+pub fn import_bookmarks(bookmarks: Vec<Bookmark>) -> Result<usize, String> {
+    if bookmarks.is_empty() {
+        return Ok(0);
+    }
+    let mut file = load_bookmarks();
+    let mut added = 0;
+    for bookmark in bookmarks {
+        let exists = file.bookmarks.iter().any(|b| {
+            b.id == bookmark.id
+                || (b.source == bookmark.source
+                    && b.session_id == bookmark.session_id
+                    && b.message_id == bookmark.message_id)
+        });
+        if !exists {
+            file.bookmarks.push(bookmark);
+            added += 1;
+        }
+    }
+    if added > 0 {
+        save_bookmarks(&file)?;
+    }
+    Ok(added)
+}
+
 pub fn remove_bookmark(id: &str) -> Result<(), String> {
     let mut file = load_bookmarks();
     let len_before = file.bookmarks.len();

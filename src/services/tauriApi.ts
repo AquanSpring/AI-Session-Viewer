@@ -30,6 +30,12 @@ import type {
   RestoreOptions,
   RestoreResult,
 } from "../types/providerSync";
+import type {
+  TransferExportRequest,
+  TransferImportOptions,
+  TransferJob,
+  TransferPreview,
+} from "../types/transfer";
 
 export async function getProjects(source: string): Promise<ProjectEntry[]> {
   return invoke<ProjectEntry[]>("get_projects", { source });
@@ -199,6 +205,48 @@ export async function writeExportFile(
 
 export async function getScanProgress(): Promise<ScanProgress> {
   return invoke<ScanProgress>("get_scan_progress");
+}
+
+// Session archive transfer. In Tauri an archive "handle" is its local path.
+export async function startTransferExport(
+  request: TransferExportRequest,
+  outputPath: string | null,
+): Promise<string> {
+  if (!outputPath) throw new Error("outputPath is required in desktop mode");
+  return invoke<string>("transfer_start_export", { request, outputPath });
+}
+
+export async function getTransferJob(jobId: string): Promise<TransferJob> {
+  return invoke<TransferJob>("transfer_job_status", { jobId });
+}
+
+export async function cancelTransferJob(jobId: string): Promise<void> {
+  return invoke<void>("transfer_cancel", { jobId });
+}
+
+export async function downloadTransferExport(_jobId: string, _fileName: string): Promise<void> {
+  throw new Error("downloadTransferExport is not supported in desktop mode");
+}
+
+export async function prepareTransferArchive(
+  archive: File | string,
+  _onProgress?: (loaded: number, total: number) => void,
+): Promise<string> {
+  if (typeof archive !== "string") throw new Error("Desktop import requires a file path");
+  return archive;
+}
+
+export async function discardTransferArchive(_handle: string): Promise<void> {}
+
+export async function inspectTransferArchive(handle: string): Promise<TransferPreview> {
+  return invoke<TransferPreview>("transfer_inspect", { archivePath: handle });
+}
+
+export async function startTransferImport(
+  handle: string,
+  options: TransferImportOptions,
+): Promise<string> {
+  return invoke<string>("transfer_start_import", { archivePath: handle, options });
 }
 
 // Skills API

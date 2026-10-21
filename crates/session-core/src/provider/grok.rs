@@ -89,7 +89,7 @@ pub fn get_sessions_dir() -> Option<PathBuf> {
         .map(|home| home.join("sessions"))
 }
 
-fn session_dirs() -> Vec<PathBuf> {
+pub(crate) fn session_dirs() -> Vec<PathBuf> {
     let Some(root) = get_sessions_dir() else {
         return Vec::new();
     };

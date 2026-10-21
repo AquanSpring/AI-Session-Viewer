@@ -33,6 +33,7 @@ import {
   Repeat,
   Sparkles,
   ChevronDown,
+  ArrowLeftRight,
 } from "lucide-react";
 import { useShallow } from "zustand/react/shallow";
 import { EscapeToClose } from "../common/EscapeToClose";
@@ -190,7 +191,7 @@ export function Sidebar() {
     // project/session of the old source goes back to the project list.
     const path = location.pathname;
     const keep =
-      ["/search", "/bookmarks", "/settings", "/skills", "/cleanup", "/recyclebin"].includes(path) ||
+      ["/search", "/bookmarks", "/settings", "/skills", "/cleanup", "/recyclebin", "/transfer"].includes(path) ||
       ((path === "/stats" || path === "/stats/requests") && (s === "claude" || s === "codex")) ||
       (path === "/provider-sync" && s === "codex");
     if (!keep) navigate("/projects");
@@ -318,13 +319,14 @@ export function Sidebar() {
         </div>
       </nav>
 
-      <details key={location.pathname} open={["/skills", "/cleanup", "/recyclebin", "/provider-sync"].includes(location.pathname)} className="mx-2 mb-2 border-t border-border pt-2">
+      <details key={location.pathname} open={["/skills", "/cleanup", "/recyclebin", "/transfer", "/provider-sync"].includes(location.pathname)} className="mx-2 mb-2 border-t border-border pt-2">
         <summary className="navigation-link cursor-pointer list-none"><Settings className="h-4 w-4" />{t("工具与管理")}<ChevronDown className="ml-auto h-3.5 w-3.5" /></summary>
         <div className="mt-1 space-y-0.5 pl-2">
           {[
             { path: "/skills", label: "Skills", icon: Sparkles },
             { path: "/cleanup", label: t("无效项管理"), icon: FolderX },
             { path: "/recyclebin", label: recycledItems.length ? t("回收站 · ") + recycledItems.length : t("回收站"), icon: Trash2 },
+            { path: "/transfer", label: t("会话迁移"), icon: ArrowLeftRight },
             ...(source === "codex" ? [{ path: "/provider-sync", label: t("Provider 同步"), icon: Repeat }] : []),
           ].map(({ path, label, icon: Icon }) => <button key={path} onClick={() => navigate(path)} aria-current={isActive(path) ? "page" : undefined} className={"navigation-link " + (isActive(path) ? "is-active" : "")}><Icon className="h-3.5 w-3.5" />{label}</button>)}
         </div>

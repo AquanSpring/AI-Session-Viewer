@@ -11,3 +11,4 @@ pub mod skills;
 pub mod stats;
 pub mod sync_config;
 pub mod trajectory;
+pub mod transfer;

@@ -20,4 +20,5 @@ pub mod skills;
 pub mod state;
 pub mod stats;
 pub mod sync_config;
+pub mod transfer;
 pub mod watcher_batch;
