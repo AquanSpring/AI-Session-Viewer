@@ -13,9 +13,10 @@ use super::rollout;
 use super::sqlite_state;
 use super::types::*;
 
+/// Same resolution as the Codex provider (`$CODEX_HOME`, else `~/.codex`), so
+/// the tool reads and repairs the data Codex actually uses.
 pub fn get_codex_home() -> Result<PathBuf, String> {
-    dirs::home_dir()
-        .map(|h| h.join(".codex"))
+    crate::provider::codex::get_codex_home()
         .ok_or_else(|| "Cannot resolve user home directory".to_string())
 }
 
@@ -23,7 +24,10 @@ pub fn get_status() -> Result<ProviderSyncStatus, String> {
     let codex_home = get_codex_home()?;
     let config_path = codex_home.join("config.toml");
     let (current_provider, implicit) = config::read_current_provider(&config_path);
-    let configured = config::list_configured_providers(&config_path);
+    let (configured, config_error) = match config::parse_configured_providers(&config_path) {
+        Ok(list) => (list, None),
+        Err(e) => (config::list_configured_providers(&config_path), Some(e)),
+    };
 
     let sessions_dir = codex_home.join("sessions");
     let archived_dir = codex_home.join("archived_sessions");
@@ -79,6 +83,13 @@ pub fn get_status() -> Result<ProviderSyncStatus, String> {
 
     let global_state_p = global_state::global_state_path(&codex_home);
     let backups = backup::list_backups(&codex_home);
+    let missing_providers = find_missing_providers(
+        &configured,
+        &current_provider,
+        &rollout_counts,
+        &archived_counts,
+        &sqlite_stats,
+    );
 
     Ok(ProviderSyncStatus {
         codex_home: codex_home.to_string_lossy().into_owned(),
@@ -102,6 +113,139 @@ pub fn get_status() -> Result<ProviderSyncStatus, String> {
             .map(|(provider, count)| EncryptedWarning { provider, count })
             .collect(),
         backups,
+        missing_providers,
+        config_error,
+    })
+}
+
+/// Provider ids referenced by sessions (or by the root `model_provider`) that
+/// Codex cannot resolve. Sessions with an empty provider are left out: Codex
+/// falls back to the default provider for them.
+fn find_missing_providers(
+    configured: &[String],
+    current_provider: &str,
+    rollouts: &HashMap<String, u32>,
+    archived: &HashMap<String, u32>,
+    sqlite: &[SqliteProviderCount],
+) -> Vec<MissingProvider> {
+    fn entry<'a>(
+        missing: &'a mut HashMap<String, MissingProvider>,
+        configured: &[String],
+        provider: &str,
+    ) -> Option<&'a mut MissingProvider> {
+        if provider.is_empty()
+            || config::is_builtin_provider(provider)
+            || configured.iter().any(|p| p == provider)
+        {
+            return None;
+        }
+        Some(
+            missing
+                .entry(provider.to_string())
+                .or_insert_with(|| MissingProvider {
+                    provider: provider.to_string(),
+                    rollouts: 0,
+                    archived: 0,
+                    sqlite_threads: 0,
+                    is_current: false,
+                }),
+        )
+    }
+
+    let mut missing: HashMap<String, MissingProvider> = HashMap::new();
+    for (provider, count) in rollouts {
+        if let Some(item) = entry(&mut missing, configured, provider) {
+            item.rollouts += count;
+        }
+    }
+    for (provider, count) in archived {
+        if let Some(item) = entry(&mut missing, configured, provider) {
+            item.archived += count;
+        }
+    }
+    for row in sqlite {
+        if let Some(item) = entry(&mut missing, configured, &row.provider) {
+            item.sqlite_threads += row.count;
+        }
+    }
+    if let Some(item) = entry(&mut missing, configured, current_provider) {
+        item.is_current = true;
+    }
+    let mut list: Vec<MissingProvider> = missing.into_values().collect();
+    list.sort_by(|a, b| {
+        b.is_current
+            .cmp(&a.is_current)
+            .then((b.rollouts + b.archived).cmp(&(a.rollouts + a.archived)))
+            .then(a.provider.cmp(&b.provider))
+    });
+    list
+}
+
+/// Make sessions saved under `providers` resumable again by appending
+/// compatibility `[model_providers.<id>]` definitions to config.toml (see
+/// [`config::append_compat_providers`]). Rollouts, SQLite and auth files are
+/// not touched; config.toml is backed up first so the repair can be restored
+/// from the backup list.
+pub fn run_repair(
+    providers: Vec<String>,
+    template: Option<String>,
+    keep: usize,
+) -> Result<RepairResult, String> {
+    let mut ids: Vec<String> = Vec::new();
+    for id in providers.iter().map(|id| id.trim()) {
+        if id.is_empty() {
+            return Err("provider id cannot be empty".into());
+        }
+        if config::is_builtin_provider(id) {
+            return Err(format!("「{id}」是 Codex 内置 provider，无需修复"));
+        }
+        if !ids.iter().any(|known| known == id) {
+            ids.push(id.to_string());
+        }
+    }
+    if ids.is_empty() {
+        return Err("请至少选择一个需要修复的 provider".into());
+    }
+    let template = template
+        .map(|t| t.trim().to_string())
+        .filter(|t| !t.is_empty());
+    if let Some(source) = &template {
+        if ids.contains(source) {
+            return Err(format!("不能用「{source}」自身作为模板"));
+        }
+    }
+
+    let codex_home = get_codex_home()?;
+    let config_path = codex_home.join("config.toml");
+    let backup_dir = backup::create_backup_dir(&codex_home)?;
+    if config_path.exists() {
+        fs::copy(&config_path, backup_dir.join("config.toml"))
+            .map_err(|e| format!("备份 config.toml 失败：{e}"))?;
+    }
+    let metadata = BackupMetadata {
+        namespace: backup::NAMESPACE.to_string(),
+        codex_home: codex_home.to_string_lossy().into_owned(),
+        target_provider: ids.join(", "),
+        created_at: Utc::now().to_rfc3339(),
+        db_files: Vec::new(),
+        changed_session_files: Vec::new(),
+        kind: "repair".to_string(),
+    };
+    let metadata_json = serde_json::to_string_pretty(&metadata)
+        .map_err(|e| format!("serialize metadata: {}", e))?;
+    fs::write(backup_dir.join("metadata.json"), metadata_json).map_err(|e| e.to_string())?;
+
+    if let Err(error) = config::append_compat_providers(&config_path, &ids, template.as_deref()) {
+        let _ = fs::remove_dir_all(&backup_dir);
+        return Err(error);
+    }
+    let _ = backup::prune_backups(&codex_home, keep.max(1));
+
+    Ok(RepairResult {
+        backup_dir: backup_dir.to_string_lossy().into_owned(),
+        config_toml_path: config_path.to_string_lossy().into_owned(),
+        added_providers: ids,
+        template,
     })
 }
 
@@ -249,6 +393,7 @@ pub fn run_clone(
         created_at: now.to_rfc3339(),
         db_files,
         changed_session_files: created_files,
+        kind: "sync".to_string(),
     };
     if let Ok(json) = serde_json::to_string_pretty(&metadata) {
         let _ = fs::write(backup_dir.join("metadata.json"), json);
@@ -367,6 +512,7 @@ fn sync_to_target(
         created_at: now.to_rfc3339(),
         db_files,
         changed_session_files: backup_items.iter().map(|i| i.path.clone()).collect(),
+        kind: "sync".to_string(),
     };
     let metadata_json = serde_json::to_string_pretty(&metadata)
         .map_err(|e| format!("serialize metadata: {}", e))?;

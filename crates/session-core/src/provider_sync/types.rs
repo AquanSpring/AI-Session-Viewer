@@ -30,6 +30,32 @@ pub struct BackupSummary {
     pub created_at: String,
     pub target_provider: String,
     pub changed_session_count: u32,
+    /// `sync` (rollout/SQLite rewrite or clone) or `repair` (config.toml only).
+    pub kind: String,
+}
+
+/// A provider id that sessions still reference but Codex cannot resolve:
+/// neither built in nor defined under `[model_providers.*]`. Resuming such a
+/// session fails with "Model provider `<id>` not found".
+#[derive(Serialize, Deserialize, Clone, Debug)]
+#[serde(rename_all = "camelCase")]
+pub struct MissingProvider {
+    pub provider: String,
+    pub rollouts: u32,
+    pub archived: u32,
+    pub sqlite_threads: u32,
+    /// The root `model_provider` of config.toml itself points at it.
+    pub is_current: bool,
+}
+
+#[derive(Serialize, Deserialize, Clone, Debug)]
+#[serde(rename_all = "camelCase")]
+pub struct RepairResult {
+    pub backup_dir: String,
+    pub config_toml_path: String,
+    pub added_providers: Vec<String>,
+    /// Provider whose settings were copied; `None` = current OpenAI login.
+    pub template: Option<String>,
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug)]
@@ -53,6 +79,9 @@ pub struct ProviderSyncStatus {
     pub mismatched_sqlite_threads: u32,
     pub encrypted_warnings: Vec<EncryptedWarning>,
     pub backups: Vec<BackupSummary>,
+    pub missing_providers: Vec<MissingProvider>,
+    /// config.toml exists but is not valid TOML (Codex cannot load it either).
+    pub config_error: Option<String>,
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug)]

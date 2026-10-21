@@ -1,7 +1,8 @@
 use std::path::PathBuf;
 
 use session_core::transfer::{
-    self, ExportRequest, ImportOptions, ImportPreview, TransferJob,
+    self, ExportRequest, ImportOptions, ImportPreview, RelocatePreview, RelocateRequest,
+    TransferJob,
 };
 
 /// Start exporting to the path the user picked in the save dialog. Returns the job id.
@@ -29,4 +30,15 @@ pub fn transfer_job_status(job_id: String) -> Result<TransferJob, String> {
 #[tauri::command]
 pub fn transfer_cancel(job_id: String) -> Result<(), String> {
     transfer::cancel_job(&job_id)
+}
+
+/// What moving a project directory would change on this machine.
+#[tauri::command(async)]
+pub fn transfer_relocate_preview(request: RelocateRequest) -> Result<RelocatePreview, String> {
+    transfer::relocate_preview(&request)
+}
+
+#[tauri::command(async)]
+pub fn transfer_start_relocate(request: RelocateRequest) -> Result<String, String> {
+    transfer::start_relocate(request)
 }

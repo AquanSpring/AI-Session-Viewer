@@ -5,6 +5,7 @@ import type {
   SyncResult,
   RestoreOptions,
   RestoreResult,
+  RepairResult,
 } from "../types/providerSync";
 
 interface ProviderSyncState {
@@ -14,6 +15,7 @@ interface ProviderSyncState {
   busy: boolean;
   lastResult: SyncResult | null;
   lastRestore: RestoreResult | null;
+  lastRepair: RepairResult | null;
 
   loadStatus: () => Promise<void>;
   runSync: (provider: string | null, keep?: number) => Promise<SyncResult>;
@@ -22,6 +24,11 @@ interface ProviderSyncState {
     backupDir: string,
     options?: RestoreOptions,
   ) => Promise<RestoreResult>;
+  runRepair: (
+    providers: string[],
+    template: string | null,
+    keep?: number,
+  ) => Promise<RepairResult>;
   prune: (keep?: number) => Promise<number>;
   clearError: () => void;
 }
@@ -33,6 +40,7 @@ export const useProviderSyncStore = create<ProviderSyncState>((set) => ({
   busy: false,
   lastResult: null,
   lastRestore: null,
+  lastRepair: null,
 
   loadStatus: async () => {
     set({ loading: true, error: null });
@@ -79,6 +87,19 @@ export const useProviderSyncStore = create<ProviderSyncState>((set) => ({
       const result = await api.providerSyncRestore(backupDir, options);
       const status = await api.providerSyncStatus();
       set({ busy: false, lastRestore: result, status });
+      return result;
+    } catch (e) {
+      set({ busy: false, error: e instanceof Error ? e.message : String(e) });
+      throw e;
+    }
+  },
+
+  runRepair: async (providers, template, keep = 5) => {
+    set({ busy: true, error: null });
+    try {
+      const result = await api.providerSyncRepair(providers, template, keep);
+      const status = await api.providerSyncStatus();
+      set({ busy: false, lastRepair: result, status });
       return result;
     } catch (e) {
       set({ busy: false, error: e instanceof Error ? e.message : String(e) });

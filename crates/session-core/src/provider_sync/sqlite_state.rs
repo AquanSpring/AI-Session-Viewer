@@ -110,6 +110,54 @@ pub fn update_threads(
     Ok(provider_updated)
 }
 
+/// Rewrite `threads.cwd` through `remap` after a project directory moved;
+/// rows `remap` does not match keep their value. With `dry_run` nothing is
+/// written. Returns how many rows were (or would be) changed.
+pub fn remap_thread_cwds(
+    path: &Path,
+    remap: impl Fn(&str) -> Option<String>,
+    dry_run: bool,
+) -> Result<u32, String> {
+    let conn = if dry_run {
+        open_read(path)?
+    } else {
+        open_write(path)?
+    };
+    if !table_exists(&conn, "threads") || !column_exists(&conn, "threads", "cwd") {
+        return Ok(0);
+    }
+    let updates: Vec<(SqlValue, String)> = {
+        let mut stmt = conn
+            .prepare("SELECT id, cwd FROM threads WHERE cwd IS NOT NULL AND cwd <> ''")
+            .map_err(|e| e.to_string())?;
+        let rows = stmt
+            .query_map([], |row| {
+                Ok((row.get::<_, SqlValue>(0)?, row.get::<_, String>(1)?))
+            })
+            .map_err(|e| e.to_string())?;
+        rows.flatten()
+            .filter_map(|(id, cwd)| {
+                let next = remap(&cwd)?;
+                (next != cwd).then_some((id, next))
+            })
+            .collect()
+    };
+    if dry_run || updates.is_empty() {
+        return Ok(updates.len() as u32);
+    }
+    conn.execute_batch("BEGIN IMMEDIATE;")
+        .map_err(|e| format!("begin tx: {}", e))?;
+    for (id, cwd) in &updates {
+        if let Err(e) = conn.execute("UPDATE threads SET cwd = ?1 WHERE id = ?2", params![cwd, id]) {
+            let _ = conn.execute_batch("ROLLBACK;");
+            return Err(format!("update cwd: {}", e));
+        }
+    }
+    conn.execute_batch("COMMIT;")
+        .map_err(|e| format!("commit: {}", e))?;
+    Ok(updates.len() as u32)
+}
+
 /// Duplicate the `threads` row identified by `old_id` into a new row with
 /// `new_id`, `new_rollout_path` and `provider`, marked un-archived. Reads the
 /// source row's columns generically (`SELECT *`) so it survives schema changes,

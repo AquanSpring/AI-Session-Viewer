@@ -27,6 +27,7 @@ import type {
   ProviderSyncStatus,
   SyncResult,
   CloneResult,
+  RepairResult,
   RestoreOptions,
   RestoreResult,
 } from "../types/providerSync";
@@ -35,6 +36,8 @@ import type {
   TransferImportOptions,
   TransferJob,
   TransferPreview,
+  RelocatePreview,
+  RelocateRequest,
 } from "../types/transfer";
 
 export async function getProjects(source: string): Promise<ProjectEntry[]> {
@@ -247,6 +250,14 @@ export async function startTransferImport(
   options: TransferImportOptions,
 ): Promise<string> {
   return invoke<string>("transfer_start_import", { archivePath: handle, options });
+}
+
+export async function previewProjectRelocate(request: RelocateRequest): Promise<RelocatePreview> {
+  return invoke<RelocatePreview>("transfer_relocate_preview", { request });
+}
+
+export async function startProjectRelocate(request: RelocateRequest): Promise<string> {
+  return invoke<string>("transfer_start_relocate", { request });
 }
 
 // Skills API
@@ -478,6 +489,14 @@ export async function providerSyncClone(
   keep: number = 5,
 ): Promise<CloneResult> {
   return invoke<CloneResult>("provider_sync_clone", { filePaths, provider, keep });
+}
+
+export async function providerSyncRepair(
+  providers: string[],
+  template: string | null,
+  keep: number = 5,
+): Promise<RepairResult> {
+  return invoke<RepairResult>("provider_sync_repair", { providers, template, keep });
 }
 
 export async function providerSyncRestore(

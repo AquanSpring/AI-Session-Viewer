@@ -8,7 +8,9 @@ use axum::http::{header, HeaderMap, StatusCode};
 use axum::response::{IntoResponse, Json, Response};
 use futures_util::StreamExt;
 use serde::{Deserialize, Serialize};
-use session_core::transfer::{self, ExportRequest, ImportOptions, ImportPreview, TransferJob};
+use session_core::transfer::{
+    self, ExportRequest, ImportOptions, ImportPreview, RelocatePreview, RelocateRequest, TransferJob,
+};
 use tokio::io::AsyncWriteExt;
 
 use crate::{require_ws_auth, AppToken, WsTicketStore};
@@ -171,5 +173,21 @@ pub async fn start_import(Json(body): Json<ImportBody>) -> Result<Json<JobRespon
     .await
     .map_err(internal)?
     .map_err(bad_request)?;
+    Ok(Json(JobResponse { job_id }))
+}
+
+pub async fn relocate_preview(Json(request): Json<RelocateRequest>) -> Result<Json<RelocatePreview>, ApiError> {
+    tokio::task::spawn_blocking(move || transfer::relocate_preview(&request))
+        .await
+        .map_err(internal)?
+        .map(Json)
+        .map_err(bad_request)
+}
+
+pub async fn start_relocate(Json(request): Json<RelocateRequest>) -> Result<Json<JobResponse>, ApiError> {
+    let job_id = tokio::task::spawn_blocking(move || transfer::start_relocate(request))
+        .await
+        .map_err(internal)?
+        .map_err(bad_request)?;
     Ok(Json(JobResponse { job_id }))
 }

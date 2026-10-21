@@ -133,6 +133,22 @@ pub fn import_bookmarks(bookmarks: Vec<Bookmark>) -> Result<usize, String> {
     Ok(added)
 }
 
+/// Edit bookmarks in place (e.g. after their sessions moved); `edit` returns
+/// whether it changed the bookmark. Returns how many changed.
+pub fn update_bookmarks(mut edit: impl FnMut(&mut Bookmark) -> bool) -> Result<usize, String> {
+    let mut file = load_bookmarks();
+    let mut changed = 0;
+    for bookmark in &mut file.bookmarks {
+        if edit(bookmark) {
+            changed += 1;
+        }
+    }
+    if changed > 0 {
+        save_bookmarks(&file)?;
+    }
+    Ok(changed)
+}
+
 pub fn remove_bookmark(id: &str) -> Result<(), String> {
     let mut file = load_bookmarks();
     let len_before = file.bookmarks.len();

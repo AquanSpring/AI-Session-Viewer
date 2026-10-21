@@ -40,6 +40,8 @@ pub fn run() {
             commands::transfer::transfer_start_import,
             commands::transfer::transfer_job_status,
             commands::transfer::transfer_cancel,
+            commands::transfer::transfer_relocate_preview,
+            commands::transfer::transfer_start_relocate,
             commands::progress::get_scan_progress,
             commands::search::global_search,
             commands::skills::list_skills,
@@ -71,6 +73,7 @@ pub fn run() {
             commands::provider_sync::provider_sync_run,
             commands::provider_sync::provider_sync_switch,
             commands::provider_sync::provider_sync_clone,
+            commands::provider_sync::provider_sync_repair,
             commands::provider_sync::provider_sync_restore,
             commands::provider_sync::provider_sync_prune,
         ])

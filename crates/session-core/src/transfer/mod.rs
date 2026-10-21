@@ -10,6 +10,7 @@
 mod archive;
 mod export;
 mod import;
+mod relocate;
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -20,6 +21,7 @@ use std::time::{Duration, SystemTime};
 use parking_lot::Mutex;
 use serde::{Deserialize, Serialize};
 
+pub use archive::remap_path;
 pub use import::inspect_archive;
 
 // ── Requests ──
@@ -112,6 +114,83 @@ pub struct PreviewProject {
     pub total_bytes: u64,
 }
 
+// ── Project relocation (same machine) ──
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RelocateRequest {
+    /// Current project directory, as recorded in the sessions.
+    pub from: String,
+    /// New absolute location.
+    pub to: String,
+    /// Move the folder itself first; otherwise it was already moved by hand.
+    #[serde(default)]
+    pub move_folder: bool,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RelocatePreviewProject {
+    /// Recorded project path (the moved folder or one of its sub-directories).
+    pub from: String,
+    pub to: String,
+    pub session_count: usize,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RelocatePreviewSource {
+    pub source: String,
+    pub session_count: usize,
+    pub projects: Vec<RelocatePreviewProject>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RelocatePreview {
+    pub from: String,
+    pub to: String,
+    pub from_exists: bool,
+    pub to_exists: bool,
+    pub sources: Vec<RelocatePreviewSource>,
+    /// `~/.claude.json` project entries to re-key.
+    pub claude_config_entries: u32,
+    /// Codex `[projects."<path>"]` trust entries to re-key.
+    pub codex_trust_entries: u32,
+    /// `threads` rows in state_5.sqlite whose cwd changes.
+    pub codex_thread_rows: u32,
+    pub bookmarks: u32,
+    pub warnings: Vec<String>,
+}
+
+#[derive(Debug, Clone, Default, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RelocateSourceReport {
+    pub source: String,
+    pub sessions: usize,
+    /// Transcript files whose cwd fields were rewritten.
+    pub rewritten_files: usize,
+    /// Per-project directories renamed to the new path.
+    pub moved_dirs: usize,
+    pub failed: usize,
+}
+
+#[derive(Debug, Clone, Default, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RelocateReport {
+    pub folder_moved: bool,
+    pub sources: Vec<RelocateSourceReport>,
+    pub claude_config_entries: u32,
+    pub claude_history_lines: u32,
+    pub codex_thread_rows: u32,
+    pub codex_trust_entries: u32,
+    pub codex_global_state: bool,
+    pub bookmarks: u32,
+    /// Copies of the index/config files taken before anything changed.
+    pub backup_dir: Option<String>,
+    pub errors: Vec<String>,
+}
+
 // ── Job state ──
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
@@ -119,6 +198,7 @@ pub struct PreviewProject {
 pub enum JobKind {
     Export,
     Import,
+    Relocate,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
@@ -180,6 +260,7 @@ pub struct TransferJob {
     pub error: Option<String>,
     pub export_summary: Option<ExportSummary>,
     pub import_report: Option<ImportReport>,
+    pub relocate_report: Option<RelocateReport>,
     pub started_at: String,
     pub finished_at: Option<String>,
 }
@@ -288,6 +369,7 @@ fn spawn_job(
             error: None,
             export_summary: None,
             import_report: None,
+            relocate_report: None,
             started_at: chrono::Utc::now().to_rfc3339(),
             finished_at: None,
         }),
@@ -299,7 +381,7 @@ fn spawn_job(
             .values()
             .any(|job| job.status.lock().state == JobState::Running)
         {
-            return Err("已有导入或导出任务正在进行，请等待其完成".to_string());
+            return Err("已有导入、导出或搬家任务正在进行，请等待其完成".to_string());
         }
         // Finished jobs are only kept so the UI can read the final status.
         all.retain(|_, job| {
@@ -417,6 +499,18 @@ pub fn start_import(
         }
         result
     })
+}
+
+/// What moving `request.from` to `request.to` would change on this machine.
+pub fn relocate_preview(request: &RelocateRequest) -> Result<RelocatePreview, String> {
+    relocate::preview(request)
+}
+
+/// Move a project directory (optionally the folder itself) and rewrite every
+/// session and index that records its path. Runs as a transfer job.
+pub fn start_relocate(request: RelocateRequest) -> Result<String, String> {
+    relocate::validate(&request, true)?;
+    spawn_job(JobKind::Relocate, move |job| relocate::run(job, &request))
 }
 
 pub fn validate_archive_name(path: &Path) -> Result<(), String> {

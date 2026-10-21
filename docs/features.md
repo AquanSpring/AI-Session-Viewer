@@ -203,6 +203,7 @@ Skills 页面中的「MCP / 插件」支持比较两个 `session-web` 节点的�
 - **状态总览**：按 provider 列出 `~/.codex/sessions/`、`~/.codex/archived_sessions/`、SQLite `threads` 表的分布与不一致计数，并扫出含 `encrypted_content` 的危险会话
 - **同步 / 切换**：改 rollout 首行 `payload.model_provider`、SQLite 三类 update（model_provider / has_user_event / cwd 单事务）、规范化 `.codex-global-state.json` 的 Windows verbatim 路径；切换还会改写 `config.toml` 顶层 `model_provider`
 - **备份与恢复**：每次写之前完整拷贝 SQLite/config/global-state 到 `~/.codex/backups_state/provider-sync/<时间戳>/`，rollout 改动只记首行原文 + mtime；恢复时可勾选粒度（config / db / sessions / global-state 各自独立开关）
+- **修复旧会话**：在第三方登录与官方登录之间切换后，`config.toml` 里可能已没有旧会话记录的 provider 定义，Codex 打开旧会话会报 ``Model provider `custom` not found``。页面列出会话（rollout / 归档 / SQLite）引用、但既非内置也未在 `[model_providers.*]` 定义的 provider，并在 `config.toml` 末尾追加兼容定义：默认沿用当前 OpenAI 登录与默认地址（`wire_api = "responses"`、`requires_openai_auth = true`，不写 `base_url`），也可复制一个已配置 provider 的设置。只追加、不改动已有行，写入前校验 TOML 并检查文件未被并发修改；会话文件、SQLite 和登录信息不动；修复前备份 `config.toml`，可在备份历史中恢复
 
 > 含加密内容的会话即使同步成功，"继续对话"或 compact 仍可能报 `invalid_encrypted_content` — 若需可靠续聊，请切回原 provider。
 
@@ -216,6 +217,17 @@ Skills 页面中的「MCP / 插件」支持比较两个 `session-web` 节点的�
 - **安全**：导入前校验清单中的每个路径，拒绝绝对路径、`..` 与链接，写入位置限定在各数据源目录内；逐文件校验大小，单个会话写入失败会回滚，不影响其他会话
 
 桌面端通过系统对话框直接读写本地文件。Web 端上传和下载都流式进行；服务器上的临时上传与导出文件保存在应用目录的 `transfer/` 下，超过 24 小时自动清理。
+
+### 项目搬家（本机）
+
+同一页面的「项目搬家」用于在本机把项目文件夹换个位置（改名、整理目录），并让各 AI 工具里的会话跟过去。填写原目录与新位置后先预览影响，再选择由本工具移动文件夹（需在同一磁盘分区）或「文件夹已手动移动」只更新记录：
+
+- **Claude**：`~/.claude/projects/<编码路径>` 重命名为新路径的编码（新目录已存在时合并，同名文件保留原位置），会话 `cwd`、`sessions-index.json`、`~/.claude.json` 中的项目设置与 `history.jsonl` 的项目字段一并更新
+- **Codex**：rollout 中的 `cwd`、`state_5.sqlite` 的 `threads.cwd`、`config.toml` 的 `[projects."<路径>"]` 信任设置、`.codex-global-state.json` 的工作区列表
+- **Grok / Oh My Pi**：会话中的 `cwd`；按路径命名的项目目录可验证时一并改名
+- **收藏**：指向搬走会话的收藏改到新位置
+
+原目录的子目录项目一起搬走；消息正文不改动。执行前把各工具的配置与索引文件备份到应用目录的 `transfer/backups/relocate-<时间戳>/`；每一步都可重复执行，中途取消或失败后选择「文件夹已手动移动」再执行即可补完，需要撤销时把新位置再搬回原目录。执行前请退出正在使用该项目的 AI 工具和编辑器。
 
 > 会话可能包含代码、命令输出和密钥，请妥善保管导出文件。Codex 会话导入后可正常查看；含加密推理内容的会话换账号或 provider 后续聊可能报 `invalid_encrypted_content`。
 

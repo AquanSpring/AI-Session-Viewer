@@ -3,7 +3,8 @@ use axum::http::StatusCode;
 use axum::response::Json;
 use serde::Deserialize;
 use session_core::provider_sync::{
-    self, CloneResult, ProviderSyncStatus, RestoreOptions, RestoreResult, SyncResult,
+    self, CloneResult, ProviderSyncStatus, RepairResult, RestoreOptions, RestoreResult,
+    SyncResult,
 };
 
 pub async fn get_status() -> Result<Json<ProviderSyncStatus>, (StatusCode, String)> {
@@ -108,4 +109,26 @@ pub async fn prune_backups(Query(q): Query<PruneQuery>) -> Result<Json<u32>, (St
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?
         .map(Json)
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e))
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RepairBody {
+    pub providers: Vec<String>,
+    #[serde(default)]
+    pub template: Option<String>,
+    #[serde(default = "default_keep")]
+    pub keep: usize,
+}
+
+pub async fn repair(
+    Json(body): Json<RepairBody>,
+) -> Result<Json<RepairResult>, (StatusCode, String)> {
+    tokio::task::spawn_blocking(move || {
+        provider_sync::run_repair(body.providers, body.template, body.keep)
+    })
+    .await
+    .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?
+    .map(Json)
+    .map_err(|e| (StatusCode::BAD_REQUEST, e))
 }

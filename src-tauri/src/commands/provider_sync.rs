@@ -1,5 +1,6 @@
 use session_core::provider_sync::{
-    self, CloneResult, ProviderSyncStatus, RestoreOptions, RestoreResult, SyncResult,
+    self, CloneResult, ProviderSyncStatus, RepairResult, RestoreOptions, RestoreResult,
+    SyncResult,
 };
 
 #[tauri::command]
@@ -63,6 +64,18 @@ pub async fn provider_sync_restore(
 pub async fn provider_sync_prune(keep: Option<usize>) -> Result<u32, String> {
     let keep = keep.unwrap_or(5);
     tokio::task::spawn_blocking(move || provider_sync::run_prune_backups(keep))
+        .await
+        .map_err(|e| e.to_string())?
+}
+
+#[tauri::command]
+pub async fn provider_sync_repair(
+    providers: Vec<String>,
+    template: Option<String>,
+    keep: Option<usize>,
+) -> Result<RepairResult, String> {
+    let keep = keep.unwrap_or(5);
+    tokio::task::spawn_blocking(move || provider_sync::run_repair(providers, template, keep))
         .await
         .map_err(|e| e.to_string())?
 }

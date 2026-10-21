@@ -86,6 +86,8 @@ After changing providers, old rollouts and SQLite metadata may still reference t
 
 Changes are backed up to `~/.codex/backups_state/provider-sync/`; restoration can select configuration, database, sessions, and global state separately. Encrypted history may still fail to resume across providers with `invalid_encrypted_content`. Use the original provider when reliable resume is required.
 
+**Repair old sessions**: after switching between a third-party login and the official login, `config.toml` may no longer define the provider recorded by old sessions, and Codex fails with ``Model provider `custom` not found``. The page lists providers referenced by rollouts, archived sessions, or SQLite threads that are neither built in nor defined under `[model_providers.*]`, and appends compatibility definitions to `config.toml`: by default the current OpenAI login and default endpoint (`wire_api = "responses"`, `requires_openai_auth = true`, no `base_url`), or a copy of a configured provider. Existing lines are untouched, the result is validated as TOML, and the write stops if the file changed meanwhile. Session files, SQLite, and login data are not modified; `config.toml` is backed up first and can be restored from the backup history.
+
 ## Session transfer
 
 Tools → Session transfer moves sessions between computers. Export selected sources (all projects or chosen ones) into one `.zip` containing the original session files, sub-agent and tool-result directories, Claude project memory and index, Codex `threads` rows and thread names, plus Viewer aliases, tags, and bookmarks. Files are streamed, so multi-gigabyte exports do not need much memory.
@@ -93,6 +95,10 @@ Tools → Session transfer moves sessions between computers. Export selected sou
 Importing first shows a preview: sessions per project, sessions that already exist here, and whether the original project path exists. A project can be mapped to a different local directory; recorded working directories (`cwd`) are rewritten so sessions can be continued locally, while message text is left untouched. Existing sessions are skipped by default; overwriting moves the local copy to `~/.claude-code-viewer/transfer/backups/` first. Archive paths are validated before anything is written, and a failed session is rolled back.
 
 Sessions may contain code, command output, and secrets, so keep exports safe. Encrypted Codex history may fail to resume under a different account or provider.
+
+### Move a project (this machine)
+
+**Move project** on the same page relocates a project folder on this machine (rename or reorganize) and takes its sessions along. Preview the changes, then let the app move the folder (same disk partition) or choose "Folder already moved by hand" to update the records only. Claude project directories under `~/.claude/projects/` are renamed to the new encoding (merged if one exists), and transcript `cwd`, `sessions-index.json`, `~/.claude.json` project settings, and `history.jsonl` follow. Codex rollout `cwd`, `threads.cwd` in `state_5.sqlite`, `[projects."<path>"]` trust entries, and Desktop workspace roots are updated, as are Grok / Oh My Pi session `cwd` fields (and their path-named directories when verifiable) and bookmarks. Sub-directory projects move too; message text is untouched. Config and index files are backed up to `transfer/backups/relocate-<timestamp>/` in the app directory. Every step can be re-run, so an interrupted move is finished by running it again with "Folder already moved by hand"; to undo, move the folder back. Quit AI tools and editors using the project first.
 
 ## Updates and file watching
 

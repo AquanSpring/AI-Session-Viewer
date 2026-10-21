@@ -207,8 +207,11 @@ pub fn remap_path(value: &str, from: &str, to: &str) -> Option<String> {
     let (_, from) = split_verbatim(from);
     let from = trim_separators(&from);
     let head = plain.get(..from.len())?;
+    // Windows tools disagree on separators too (`C:/a` in ~/.claude.json).
     let matches = if is_windows_path(from) {
-        head.eq_ignore_ascii_case(from)
+        head.chars().zip(from.chars()).all(|(a, b)| {
+            a.eq_ignore_ascii_case(&b) || (matches!(a, '/' | '\\') && matches!(b, '/' | '\\'))
+        })
     } else {
         head == from
     };
@@ -268,20 +271,99 @@ impl Remap {
     }
 }
 
-/// Rewrite the cwd fields that the supported CLIs persist: Claude/OMP rows
-/// (`cwd`), Codex `session_meta` / `turn_context` (`payload.cwd`) and the Grok
-/// summary (`info.cwd`). Message bodies are history and stay untouched.
+/// Keys whose value is a working directory or a list of workspace roots:
+/// Claude/OMP rows (`cwd`), Grok summaries (`info.cwd`), and Codex
+/// `session_meta` / `turn_context` / `thread_settings` / `world_state`.
+const PATH_KEYS: &[&str] = &["cwd", "workspace_roots", "runtime_workspace_roots"];
+
+/// Subtrees that are conversation history (message bodies, tool calls and
+/// their output): paths quoted there stay as they were.
+const HISTORY_KEYS: &[&str] = &[
+    "message",
+    "content",
+    "text",
+    "input",
+    "output",
+    "arguments",
+    "toolUseResult",
+    "base_instructions",
+];
+
+fn remap_string(value: &mut String, remap: &Remap) -> bool {
+    match remap.apply(value) {
+        Some(next) if next != *value => {
+            *value = next;
+            true
+        }
+        _ => false,
+    }
+}
+
+/// Codex `world_state` describes the workspace as XML
+/// (`<workspace_roots><root>…</root></workspace_roots>`); remap each root.
+fn remap_xml_roots(xml: &mut String, remap: &Remap) -> bool {
+    const OPEN: &str = "<root>";
+    const CLOSE: &str = "</root>";
+    let mut out = String::with_capacity(xml.len());
+    let mut rest = xml.as_str();
+    let mut changed = false;
+    while let Some(start) = rest.find(OPEN) {
+        let body = start + OPEN.len();
+        let Some(len) = rest[body..].find(CLOSE) else {
+            break;
+        };
+        out.push_str(&rest[..body]);
+        let mut root = rest[body..body + len].to_string();
+        changed |= remap_string(&mut root, remap);
+        out.push_str(&root);
+        rest = &rest[body + len..];
+    }
+    if changed {
+        out.push_str(rest);
+        *xml = out;
+    }
+    changed
+}
+
+/// Rewrite the working-directory fields the supported CLIs persist (see
+/// [`PATH_KEYS`]) wherever they appear in a row, so resume and listings follow
+/// the new location. Message bodies are history and stay untouched.
 pub fn rewrite_cwd_fields(value: &mut Value, remap: &Remap) -> bool {
     let mut changed = false;
-    for pointer in ["/cwd", "/payload/cwd", "/info/cwd"] {
-        if let Some(Value::String(current)) = value.pointer_mut(pointer) {
-            if let Some(next) = remap.apply(current) {
-                if next != *current {
-                    *current = next;
-                    changed = true;
+    match value {
+        Value::Object(map) => {
+            for (key, child) in map.iter_mut() {
+                let key = key.as_str();
+                if HISTORY_KEYS.contains(&key) {
+                    continue;
+                }
+                if PATH_KEYS.contains(&key) {
+                    match child {
+                        Value::String(path) => changed |= remap_string(path, remap),
+                        Value::Array(items) => {
+                            for item in items {
+                                if let Value::String(path) = item {
+                                    changed |= remap_string(path, remap);
+                                }
+                            }
+                        }
+                        _ => changed |= rewrite_cwd_fields(child, remap),
+                    }
+                } else if key == "filesystem" {
+                    if let Value::String(xml) = child {
+                        changed |= remap_xml_roots(xml, remap);
+                    }
+                } else {
+                    changed |= rewrite_cwd_fields(child, remap);
                 }
             }
         }
+        Value::Array(items) => {
+            for item in items {
+                changed |= rewrite_cwd_fields(item, remap);
+            }
+        }
+        _ => {}
     }
     changed
 }
@@ -319,6 +401,10 @@ mod tests {
             Some("/home/b/proj")
         );
         assert_eq!(remap_path("/Users/A/proj", "/Users/a/proj", "/x"), None);
+        assert_eq!(
+            remap_path("C:/Users/a/proj/src", r"C:\Users\a\proj", r"D:\work\proj").as_deref(),
+            Some(r"D:\work\proj\src")
+        );
         let remap = Remap {
             from: r"C:\Users\a\proj".into(),
             to: "/x".into(),
@@ -355,5 +441,39 @@ mod tests {
         assert_eq!(row["cwd"], "/new/a");
         assert_eq!(row["payload"]["cwd"], "/new");
         assert_eq!(row["message"]["content"], "/old/a stays");
+
+        // Newer Codex rollouts also record workspace roots and thread settings.
+        let mut meta = serde_json::json!({
+            "type": "session_meta",
+            "payload": { "cwd": "/old", "runtime_workspace_roots": ["/old", "/elsewhere"] }
+        });
+        assert!(rewrite_cwd_fields(&mut meta, &remap));
+        assert_eq!(meta["payload"]["runtime_workspace_roots"], serde_json::json!(["/new", "/elsewhere"]));
+        let mut settings = serde_json::json!({
+            "type": "event_msg",
+            "payload": { "thread_settings": { "cwd": "/old/x", "runtime_workspace_roots": ["/old/x"] } }
+        });
+        assert!(rewrite_cwd_fields(&mut settings, &remap));
+        assert_eq!(settings["payload"]["thread_settings"]["cwd"], "/new/x");
+        let mut world = serde_json::json!({
+            "type": "world_state",
+            "payload": { "state": { "environments": {
+                "environments": { "local": { "cwd": "/old" } },
+                "filesystem": "<filesystem><workspace_roots><root>/old</root><root>/oldish</root></workspace_roots></filesystem>"
+            } } }
+        });
+        assert!(rewrite_cwd_fields(&mut world, &remap));
+        let env = &world["payload"]["state"]["environments"];
+        assert_eq!(env["environments"]["local"]["cwd"], "/new");
+        assert_eq!(
+            env["filesystem"],
+            "<filesystem><workspace_roots><root>/new</root><root>/oldish</root></workspace_roots></filesystem>"
+        );
+        // The injected environment context of a user turn is history.
+        let mut turn = serde_json::json!({
+            "type": "response_item",
+            "payload": { "content": [{ "text": "<cwd>/old</cwd>" }] }
+        });
+        assert!(!rewrite_cwd_fields(&mut turn, &remap));
     }
 }

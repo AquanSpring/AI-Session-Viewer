@@ -7,6 +7,7 @@ import {
   AlertCircle,
   AlertTriangle,
   Archive,
+  CheckCircle2,
   Database,
   FileJson,
   FolderOpen,
@@ -15,11 +16,12 @@ import {
   RefreshCw,
   Repeat,
   RotateCcw,
+  Wrench,
   Settings2,
   ShieldAlert,
   Trash2,
 } from "lucide-react";
-import type { BackupSummary, ProviderSyncStatus } from "../../types/providerSync";
+import type { BackupSummary, ProviderSyncStatus, RepairResult } from "../../types/providerSync";
 import { EscapeToClose } from "../common/EscapeToClose";
 
 export function ProviderSyncPage() {
@@ -32,10 +34,12 @@ export function ProviderSyncPage() {
     busy,
     lastResult,
     lastRestore,
+    lastRepair,
     loadStatus,
     runSync,
     runSwitch,
     runRestore,
+    runRepair,
     prune,
     clearError,
   } = useProviderSyncStore();
@@ -174,6 +178,19 @@ export function ProviderSyncPage() {
         ) : status ? (
           <>
             <StatusOverview status={status} totalMismatched={totalMismatched} />
+
+            <RepairSection
+              status={status}
+              busy={busy}
+              lastRepair={lastRepair}
+              onRepair={async (providers, template) => {
+                try {
+                  await runRepair(providers, template, keep);
+                } catch {
+                  /* surfaced via store */
+                }
+              }}
+            />
 
             <section className="rounded-lg border border-border bg-card p-4 space-y-3">
               <h2 className="text-sm font-semibold flex items-center gap-1.5">
@@ -475,6 +492,179 @@ function ProviderDistribution({
   );
 }
 
+/** Preview of the block appended for one provider id (mirrors the backend). */
+function compatPreview(id: string, template: string): string {
+  const key = /^[A-Za-z0-9_-]+$/.test(id) ? id : JSON.stringify(id);
+  if (template) {
+    return `[model_providers.${key}]\n# ← [model_providers.${template}]`;
+  }
+  return [
+    `[model_providers.${key}]`,
+    `name = ${JSON.stringify(`OpenAI (legacy ${id} compatibility)`)}`,
+    `wire_api = "responses"`,
+    `requires_openai_auth = true`,
+  ].join("\n");
+}
+
+function RepairSection({
+  status,
+  busy,
+  lastRepair,
+  onRepair,
+}: {
+  status: ProviderSyncStatus;
+  busy: boolean;
+  lastRepair: RepairResult | null;
+  onRepair: (providers: string[], template: string | null) => Promise<void>;
+}) {
+  const { t } = useTranslation();
+  const missing = status.missingProviders;
+  const [selected, setSelected] = useState<Set<string>>(new Set());
+  // "" = reuse the current OpenAI login; otherwise copy that provider's settings.
+  const [template, setTemplate] = useState("");
+
+  useEffect(() => {
+    setSelected(new Set(status.missingProviders.map((m) => m.provider)));
+  }, [status.missingProviders]);
+
+  useEffect(() => {
+    if (template && !status.configuredProviders.includes(template)) setTemplate("");
+  }, [status.configuredProviders, template]);
+
+  const chosen = missing.filter((m) => selected.has(m.provider)).map((m) => m.provider);
+
+  const handleRepair = async () => {
+    if (chosen.length === 0) return;
+    const message = template
+      ? t("将在 config.toml 末尾追加 {{v0}} 的定义，设置复制自「{{v1}}」。不会修改会话文件。继续？", {
+          v0: chosen.join(", "),
+          v1: template,
+        })
+      : t("将在 config.toml 末尾追加 {{v0}} 的兼容定义，沿用当前 OpenAI 登录与默认地址。不会修改会话文件。继续？", {
+          v0: chosen.join(", "),
+        });
+    if (!window.confirm(message)) return;
+    await onRepair(chosen, template || null);
+  };
+
+  return (
+    <section className="rounded-lg border border-border bg-card p-4 space-y-3">
+      <h2 className="text-sm font-semibold flex items-center gap-1.5">
+        <Wrench className="w-4 h-4" />
+        {t("修复旧会话")}
+      </h2>
+      <p className="text-xs text-muted-foreground">
+        {t("在第三方登录和官方登录之间切换后，旧会话仍记录着原来的 provider。若 config.toml 中已没有它的定义，打开旧会话会提示「Model provider not found」。修复会为这些 provider 补回兼容定义，会话文件、SQLite 和登录信息保持不变。")}
+      </p>
+
+      {status.configError && (
+        <div className="rounded-md border border-destructive/40 bg-destructive/10 p-2 text-xs text-destructive break-all">
+          {status.configError}
+        </div>
+      )}
+
+      {missing.length === 0 ? (
+        <div className="flex items-center gap-1.5 text-xs text-success">
+          <CheckCircle2 className="w-3.5 h-3.5" />
+          {t("所有会话引用的 provider 都能解析，无需修复。")}
+        </div>
+      ) : (
+        <>
+          <div className="space-y-1.5">
+            {missing.map((m) => (
+              <label
+                key={m.provider}
+                className="flex items-center gap-3 px-3 py-2 rounded-md border border-warning/40 bg-warning/5 text-xs cursor-pointer"
+              >
+                <input
+                  type="checkbox"
+                  checked={selected.has(m.provider)}
+                  disabled={busy}
+                  onChange={(e) =>
+                    setSelected((prev) => {
+                      const next = new Set(prev);
+                      if (e.target.checked) next.add(m.provider);
+                      else next.delete(m.provider);
+                      return next;
+                    })
+                  }
+                />
+                <span className="font-mono text-foreground">{m.provider}</span>
+                {m.isCurrent && (
+                  <span className="text-destructive">{t("当前 model_provider 也指向它")}</span>
+                )}
+                <span className="ml-auto text-muted-foreground">
+                  {t("活跃 {{v0}} · 归档 {{v1}} · SQLite {{v2}}", {
+                    v0: m.rollouts,
+                    v1: m.archived,
+                    v2: m.sqliteThreads,
+                  })}
+                </span>
+              </label>
+            ))}
+          </div>
+
+          <div className="flex flex-col gap-1.5">
+            <label className="text-xs text-muted-foreground">{t("补回的定义使用")}</label>
+            <select
+              value={template}
+              onChange={(e) => setTemplate(e.target.value)}
+              disabled={busy}
+              className="bg-muted border border-border rounded px-2 py-1.5 text-xs"
+            >
+              <option value="">{t("当前 OpenAI 登录（官方账号，推荐）")}</option>
+              {status.configuredProviders
+                .filter((p) => !chosen.includes(p))
+                .map((p) => (
+                  <option key={p} value={p}>
+                    {t("复制已配置的「{{v0}}」（第三方网关）", { v0: p })}
+                  </option>
+                ))}
+            </select>
+          </div>
+
+          {chosen.length > 0 && (
+            <pre className="rounded-md border border-border bg-muted/40 px-3 py-2 text-[11px] font-mono whitespace-pre-wrap break-all text-muted-foreground">
+              {chosen.map((id) => compatPreview(id, template)).join("\n\n")}
+            </pre>
+          )}
+
+          <button
+            onClick={() => void handleRepair()}
+            disabled={busy || chosen.length === 0 || !!status.configError}
+            className="w-full px-3 py-2 text-sm rounded-md bg-primary text-primary-foreground hover:bg-primary/90 disabled:opacity-50 transition-colors flex items-center justify-center gap-1.5"
+          >
+            <Wrench className="w-4 h-4" />
+            {busy ? t("执行中...") : t("修复 {{v0}} 个 provider", { v0: chosen.length })}
+          </button>
+          <p className="text-[11px] text-muted-foreground">
+            {t("如果更希望把旧会话直接归到当前 provider，可改用下方的「同步」。")}
+          </p>
+        </>
+      )}
+
+      {lastRepair && !busy && (
+        <div className="rounded-md border border-success/40 bg-success/10 p-3 text-xs space-y-1">
+          <div className="font-medium text-success">
+            {t("已补充定义：{{v0}}", { v0: lastRepair.addedProviders.join(", ") })}
+          </div>
+          <div className="text-muted-foreground space-y-0.5">
+            <div>
+              {lastRepair.template
+                ? t("设置复制自「{{v0}}」", { v0: lastRepair.template })
+                : t("沿用当前 OpenAI 登录与默认地址")}
+            </div>
+            <div className="break-all">{t("备份目录：")}{lastRepair.backupDir}</div>
+            <div>
+              {t("请在 Codex 中关闭并重新打开旧会话；若仍显示旧错误，重启 Codex。需要回退时，在下方备份历史中恢复 config.toml。")}
+            </div>
+          </div>
+        </div>
+      )}
+    </section>
+  );
+}
+
 function SyncResultSummary({ result }: { result: { backupDir: string; targetProvider: string; updatedRollouts: number; updatedSqliteRows: number; globalStateUpdated: boolean; configUpdated: boolean; skippedLocked: string[] } }) {
   const { t } = useTranslation();
   return (
@@ -550,7 +740,10 @@ function BackupSection({
               <div className="flex-1 min-w-0 text-xs">
                 <div className="font-mono text-foreground truncate">{b.name}</div>
                 <div className="text-muted-foreground">
-                  → {b.targetProvider} {t("· 改写{{v0}} 个 rollout", { v0: b.changedSessionCount })}</div>
+                  {b.kind === "repair"
+                    ? t("修复：补充 provider 定义 {{v0}}", { v0: b.targetProvider })
+                    : <>→ {b.targetProvider} {t("· 改写{{v0}} 个 rollout", { v0: b.changedSessionCount })}</>}
+                </div>
                 <div className="text-muted-foreground/70 text-[10px] break-all">
                   {b.path}
                 </div>

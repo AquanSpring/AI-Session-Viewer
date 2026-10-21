@@ -8,6 +8,7 @@ import {
   ChevronDown,
   ChevronRight,
   Download,
+  FolderInput,
   FolderOpen,
   Loader2,
   Upload,
@@ -23,6 +24,7 @@ import type {
   TransferJob,
   TransferPreview,
   TransferPreviewProject,
+  RelocatePreview,
 } from "../../types/transfer";
 import { formatDateTime } from "../../utils/dateTime";
 
@@ -65,6 +67,8 @@ const PHASE_LABELS: Record<string, string> = {
   get scanning() { return t("正在扫描会话..."); },
   get copying() { return t("正在复制文件..."); },
   get merging() { return t("正在合并索引与元数据..."); },
+  get moving() { return t("正在移动文件夹..."); },
+  get rewriting() { return t("正在改写会话中的路径..."); },
   get finishing() { return t("正在写入归档..."); },
   get done() { return t("已完成"); },
 };
@@ -811,6 +815,361 @@ function ImportSection() {
   );
 }
 
+// ── Relocate a project on this machine ──
+
+function joinPath(parent: string, name: string): string {
+  const separator = parent.includes("\\") && !parent.includes("/") ? "\\" : "/";
+  return parent.endsWith(separator) ? `${parent}${name}` : `${parent}${separator}${name}`;
+}
+
+function baseName(path: string): string {
+  return path.replace(/[\\/]+$/, "").split(/[\\/]/).pop() ?? "";
+}
+
+function RelocateSection() {
+  const { t } = useTranslation();
+  const loadProjects = useAppStore((state) => state.loadProjects);
+  const [from, setFrom] = useState("");
+  const [to, setTo] = useState("");
+  const [moveFolder, setMoveFolder] = useState(true);
+  const [knownPaths, setKnownPaths] = useState<string[]>([]);
+  const [preview, setPreview] = useState<RelocatePreview | null>(null);
+  const [previewing, setPreviewing] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+
+  const { job, start, reset, running } = useTransferJob((finished) => {
+    if (finished.state === "failed") setError(finished.error ?? t("搬家失败"));
+    setPreview(null);
+    void loadProjects();
+  });
+
+  // Suggest project directories recorded by any source.
+  useEffect(() => {
+    let alive = true;
+    void Promise.all(
+      SOURCE_OPTIONS.map((option) => api.getProjects(option.id).catch(() => [] as ProjectEntry[])),
+    ).then((lists) => {
+      if (!alive) return;
+      const paths = new Set<string>();
+      for (const project of lists.flat()) {
+        if (!project.isVirtual && project.displayPath) paths.add(project.displayPath);
+      }
+      setKnownPaths([...paths].sort());
+    });
+    return () => {
+      alive = false;
+    };
+  }, []);
+
+  const request = { from: from.trim(), to: to.trim(), moveFolder };
+  const stale = !!preview && (preview.from !== request.from || preview.to !== request.to);
+
+  const pickFrom = async () => {
+    const { open } = await import("@tauri-apps/plugin-dialog");
+    const picked = await open({ directory: true, multiple: false, title: t("选择要搬家的项目目录") });
+    if (typeof picked === "string") setFrom(picked);
+  };
+
+  const pickTo = async () => {
+    const { open } = await import("@tauri-apps/plugin-dialog");
+    const picked = await open({
+      directory: true,
+      multiple: false,
+      title: moveFolder ? t("选择新位置的上级目录") : t("选择已移动到的新目录"),
+    });
+    if (typeof picked !== "string") return;
+    setTo(moveFolder && from.trim() ? joinPath(picked, baseName(from.trim())) : picked);
+  };
+
+  const handlePreview = async () => {
+    setError(null);
+    setPreviewing(true);
+    reset();
+    try {
+      setPreview(await api.previewProjectRelocate(request));
+    } catch (e) {
+      setPreview(null);
+      setError(errorText(e));
+    } finally {
+      setPreviewing(false);
+    }
+  };
+
+  const handleStart = async () => {
+    if (!preview) return;
+    const message = moveFolder
+      ? t("将把文件夹 {{from}} 移动到 {{to}}，并改写相关会话与索引。请先退出正在使用该项目的 AI 工具和编辑器。继续？", {
+          from: request.from,
+          to: request.to,
+        })
+      : t("将把会话与索引中的 {{from}} 改为 {{to}}（文件夹本身不动）。请先退出正在使用该项目的 AI 工具。继续？", {
+          from: request.from,
+          to: request.to,
+        });
+    if (!window.confirm(message)) return;
+    setError(null);
+    try {
+      start(await api.startProjectRelocate(request));
+    } catch (e) {
+      setError(errorText(e));
+    }
+  };
+
+  const total = preview?.sources.reduce((sum, source) => sum + source.sessionCount, 0) ?? 0;
+  const blocker = !preview
+    ? null
+    : moveFolder && !preview.fromExists
+      ? t("原目录不存在。若已手动移动，请选择「文件夹已手动移动」。")
+      : moveFolder && preview.toExists
+        ? t("新位置已存在。若文件夹已手动移到这里，请选择「文件夹已手动移动」。")
+        : null;
+  const report = job?.relocateReport;
+
+  return (
+    <section className="rounded-lg border border-border bg-card p-4 space-y-3 xl:col-span-2">
+      <h2 className="text-sm font-semibold flex items-center gap-1.5">
+        <FolderInput className="w-4 h-4" />
+        {t("项目搬家")}
+      </h2>
+      <p className="text-xs text-muted-foreground">
+        {t("在本机把项目文件夹换个位置（改名、整理目录；跨磁盘请先手动移动），并让 Claude Code、Codex 等工具的会话跟过去：会话记录的工作目录、按路径命名的会话目录、项目设置与信任记录、收藏都会改到新路径，搬家后仍可在新位置续聊。")}
+      </p>
+
+      <datalist id="relocate-known-paths">
+        {knownPaths.map((path) => (
+          <option key={path} value={path} />
+        ))}
+      </datalist>
+      <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
+        <div className="space-y-1">
+          <label className="text-xs text-muted-foreground">{t("原目录")}</label>
+          <div className="flex items-center gap-1.5">
+            <input
+              type="text"
+              list="relocate-known-paths"
+              value={from}
+              disabled={running}
+              onChange={(e) => setFrom(e.target.value)}
+              placeholder={t("会话中记录的项目路径")}
+              className="flex-1 min-w-0 bg-muted border border-border rounded px-2 py-1.5 text-xs font-mono"
+            />
+            {usesLocalFiles() && (
+              <button
+                onClick={() => void pickFrom()}
+                disabled={running}
+                className="shrink-0 p-1.5 rounded border border-border hover:bg-accent/50"
+                title={t("选择目录")}
+              >
+                <FolderOpen className="w-3.5 h-3.5" />
+              </button>
+            )}
+          </div>
+        </div>
+        <div className="space-y-1">
+          <label className="text-xs text-muted-foreground">{t("新位置")}</label>
+          <div className="flex items-center gap-1.5">
+            <input
+              type="text"
+              value={to}
+              disabled={running}
+              onChange={(e) => setTo(e.target.value)}
+              placeholder={moveFolder ? t("搬家后的完整路径（不能已存在）") : t("文件夹现在所在的路径")}
+              className="flex-1 min-w-0 bg-muted border border-border rounded px-2 py-1.5 text-xs font-mono"
+            />
+            {usesLocalFiles() && (
+              <button
+                onClick={() => void pickTo()}
+                disabled={running}
+                className="shrink-0 p-1.5 rounded border border-border hover:bg-accent/50"
+                title={moveFolder ? t("选择上级目录") : t("选择目录")}
+              >
+                <FolderOpen className="w-3.5 h-3.5" />
+              </button>
+            )}
+          </div>
+        </div>
+      </div>
+
+      <div className="flex flex-wrap gap-x-4 gap-y-1">
+        <label className="flex items-center gap-2 text-xs">
+          <input type="radio" checked={moveFolder} disabled={running} onChange={() => setMoveFolder(true)} />
+          {t("由本工具移动文件夹（需在同一磁盘分区）")}
+        </label>
+        <label className="flex items-center gap-2 text-xs">
+          <input type="radio" checked={!moveFolder} disabled={running} onChange={() => setMoveFolder(false)} />
+          {t("文件夹已手动移动，只更新会话与索引")}
+        </label>
+      </div>
+
+      {error && <ErrorBanner message={error} onClose={() => setError(null)} />}
+
+      {!running && (
+        <button
+          onClick={() => void handlePreview()}
+          disabled={previewing || !request.from || !request.to}
+          className="flex items-center gap-1.5 px-3 py-1.5 text-xs rounded-md border border-border bg-card hover:bg-accent/50 transition-colors disabled:opacity-50"
+        >
+          {previewing && <Loader2 className="w-3.5 h-3.5 animate-spin" />}
+          {t("预览影响")}
+        </button>
+      )}
+
+      {preview && !report && (
+        <div className="space-y-2">
+          {total === 0 ? (
+            <p className="text-xs text-muted-foreground">{t("没有会话记录在这个目录下；仍可更新工具中的项目设置。")}</p>
+          ) : (
+            <div className="space-y-2">
+              {preview.sources.map((source) => (
+                <div key={source.source} className="rounded-md border border-border">
+                  <div className="flex items-center justify-between px-3 py-1.5 border-b border-border text-xs">
+                    <span className="font-medium">{sourceLabel(source.source)}</span>
+                    <span className="text-muted-foreground">
+                      {t("{{count}} 个会话", { count: source.sessionCount })}
+                    </span>
+                  </div>
+                  <div className="max-h-40 overflow-y-auto divide-y divide-border">
+                    {source.projects.map((project) => (
+                      <div key={project.from} className="px-3 py-1.5 text-[11px] font-mono space-y-0.5">
+                        <div className="truncate text-muted-foreground" title={project.from}>
+                          {project.from}
+                        </div>
+                        <div className="truncate" title={project.to}>
+                          → {project.to}
+                          <span className="ml-2 font-sans text-muted-foreground">
+                            {t("{{count}} 个会话", { count: project.sessionCount })}
+                          </span>
+                        </div>
+                      </div>
+                    ))}
+                  </div>
+                </div>
+              ))}
+            </div>
+          )}
+          <ul className="text-xs text-muted-foreground space-y-0.5">
+            <li>{t("Claude 项目设置（~/.claude.json）：{{count}} 项", { count: preview.claudeConfigEntries })}</li>
+            <li>
+              {t("Codex 信任设置 {{trust}} 项，线程数据库 {{rows}} 行", {
+                trust: preview.codexTrustEntries,
+                rows: preview.codexThreadRows,
+              })}
+            </li>
+            <li>{t("收藏 {{count}} 条", { count: preview.bookmarks })}</li>
+          </ul>
+          {preview.warnings.map((warning) => (
+            <div key={warning} className="text-xs text-warning break-all">
+              {warning}
+            </div>
+          ))}
+          {blocker && <div className="text-xs text-destructive">{blocker}</div>}
+          {stale && <div className="text-xs text-warning">{t("路径已修改，请重新预览。")}</div>}
+          <p className="text-[11px] text-muted-foreground">
+            {t("会话正文不会改动，只改写其中记录的工作目录。执行前会备份各工具的配置与索引文件；需要撤销时，把新位置再搬回原目录即可。")}
+          </p>
+        </div>
+      )}
+
+      {running ? (
+        <JobProgress job={job} onCancel={() => job && void api.cancelTransferJob(job.id)} />
+      ) : (
+        preview &&
+        !report && (
+          <button
+            onClick={() => void handleStart()}
+            disabled={stale || !!blocker}
+            className="w-full px-3 py-2 text-sm rounded-md bg-primary text-primary-foreground hover:bg-primary/90 disabled:opacity-50 transition-colors flex items-center justify-center gap-1.5"
+          >
+            <FolderInput className="w-4 h-4" />
+            {moveFolder
+              ? t("移动文件夹并更新 {{count}} 个会话", { count: total })
+              : t("更新 {{count}} 个会话", { count: total })}
+          </button>
+        )
+      )}
+
+      {job?.state === "cancelled" && !report && <p className="text-xs text-muted-foreground">{t("搬家已取消")}</p>}
+
+      {report && (
+        <div
+          className={`rounded-md border p-3 space-y-2 text-sm ${
+            job?.state === "completed" && report.errors.length === 0
+              ? "border-success/40 bg-success/10"
+              : "border-warning/40 bg-warning/10"
+          }`}
+        >
+          <div className="flex items-center gap-1.5">
+            <CheckCircle2 className="w-4 h-4" />
+            {job?.state === "cancelled"
+              ? t("搬家已取消，以下为取消前的结果；再次执行（选择「文件夹已手动移动」）可继续完成")
+              : job?.state === "failed"
+                ? t("搬家未完成，以下为已完成的部分")
+                : t("搬家完成")}
+          </div>
+          <ul className="text-xs space-y-0.5">
+            {report.folderMoved && <li>{t("文件夹已移动到新位置")}</li>}
+            {report.sources.map((source) => (
+              <li key={source.source}>
+                {sourceLabel(source.source)}：
+                {t("{{sessions}} 个会话，改写 {{files}} 个文件，迁移 {{dirs}} 个目录，失败 {{failed}}", {
+                  sessions: source.sessions,
+                  files: source.rewrittenFiles,
+                  dirs: source.movedDirs,
+                  failed: source.failed,
+                })}
+              </li>
+            ))}
+            {report.claudeConfigEntries > 0 && (
+              <li>{t("Claude 项目设置 {{count}} 项", { count: report.claudeConfigEntries })}</li>
+            )}
+            {report.claudeHistoryLines > 0 && (
+              <li>{t("Claude 输入历史 {{count}} 条", { count: report.claudeHistoryLines })}</li>
+            )}
+            {(report.codexThreadRows > 0 || report.codexTrustEntries > 0 || report.codexGlobalState) && (
+              <li>
+                {t("Codex 线程数据库 {{rows}} 行，信任设置 {{trust}} 项", {
+                  rows: report.codexThreadRows,
+                  trust: report.codexTrustEntries,
+                })}
+                {report.codexGlobalState ? t("，已更新工作区列表") : ""}
+              </li>
+            )}
+            {report.bookmarks > 0 && <li>{t("收藏 {{count}} 条", { count: report.bookmarks })}</li>}
+          </ul>
+          {report.backupDir && (
+            <div className="text-xs text-muted-foreground">
+              {t("配置与索引文件已备份到：")}
+              <span className="font-mono break-all">{report.backupDir}</span>
+            </div>
+          )}
+          {report.errors.length > 0 && (
+            <details className="text-xs">
+              <summary className="cursor-pointer text-destructive">
+                {t("{{count}} 条问题", { count: report.errors.length })}
+              </summary>
+              <ul className="mt-1 space-y-0.5 font-mono break-all text-muted-foreground">
+                {report.errors.map((message, index) => (
+                  <li key={index}>{message}</li>
+                ))}
+              </ul>
+            </details>
+          )}
+          <button
+            onClick={() => {
+              reset();
+              setFrom("");
+              setTo("");
+            }}
+            className="text-xs underline hover:no-underline"
+          >
+            {t("搬另一个项目")}
+          </button>
+        </div>
+      )}
+    </section>
+  );
+}
+
 export function TransferPage() {
   const { t } = useTranslation();
   return (
@@ -822,12 +1181,13 @@ export function TransferPage() {
             {t("会话迁移")}
           </h1>
           <p className="mt-1 text-sm text-muted-foreground">
-            {t("在电脑之间搬运 AI 会话：在旧电脑导出为一个压缩包，在新电脑导入。")}
+            {t("在电脑之间搬运 AI 会话：在旧电脑导出为一个压缩包，在新电脑导入；或在本机把项目文件夹搬到新位置。")}
           </p>
         </header>
         <div className="grid grid-cols-1 xl:grid-cols-2 gap-4 items-start">
           <ExportSection />
           <ImportSection />
+          <RelocateSection />
         </div>
       </div>
     </div>

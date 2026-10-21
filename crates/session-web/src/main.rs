@@ -469,6 +469,10 @@ Set --token / ASV_TOKEN, bind to 127.0.0.1, or pass --allow-no-auth to override.
             post(routes::provider_sync::clone),
         )
         .route(
+            "/api/provider-sync/repair",
+            post(routes::provider_sync::repair),
+        )
+        .route(
             "/api/provider-sync/restore",
             post(routes::provider_sync::restore),
         )
@@ -501,6 +505,11 @@ Set --token / ASV_TOKEN, bind to 127.0.0.1, or pass --allow-no-auth to override.
             get(routes::transfer::preview_upload),
         )
         .route("/api/transfer/import", post(routes::transfer::start_import))
+        .route(
+            "/api/transfer/relocate/preview",
+            post(routes::transfer::relocate_preview),
+        )
+        .route("/api/transfer/relocate", post(routes::transfer::start_relocate))
         // Single-use ticket endpoint — must be authenticated with the
         // standard Bearer header. Used by browsers to upgrade to WebSocket
         // without leaking the long-lived token through the URL.

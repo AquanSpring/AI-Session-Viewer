@@ -27,6 +27,7 @@ import type {
   ProviderSyncStatus,
   SyncResult,
   CloneResult,
+  RepairResult,
   RestoreOptions,
   RestoreResult,
 } from "../types/providerSync";
@@ -35,6 +36,8 @@ import type {
   TransferImportOptions,
   TransferJob,
   TransferPreview,
+  RelocatePreview,
+  RelocateRequest,
 } from "../types/transfer";
 import { getApiBaseUrl, getApiToken } from "./nodeConfig";
 
@@ -499,6 +502,15 @@ export async function startTransferImport(
   return jobId;
 }
 
+export async function previewProjectRelocate(request: RelocateRequest): Promise<RelocatePreview> {
+  return apiPost<RelocatePreview>("/api/transfer/relocate/preview", request);
+}
+
+export async function startProjectRelocate(request: RelocateRequest): Promise<string> {
+  const { jobId } = await apiPost<{ jobId: string }>("/api/transfer/relocate", request);
+  return jobId;
+}
+
 // Skills API
 export async function listSkills(projectPath?: string | null): Promise<SkillsResult> {
   const params: Record<string, string> = {};
@@ -700,6 +712,14 @@ export async function providerSyncClone(
   keep: number = 5,
 ): Promise<CloneResult> {
   return apiPost("/api/provider-sync/clone", { filePaths, provider, keep });
+}
+
+export async function providerSyncRepair(
+  providers: string[],
+  template: string | null,
+  keep: number = 5,
+): Promise<RepairResult> {
+  return apiPost("/api/provider-sync/repair", { providers, template, keep });
 }
 
 export async function providerSyncRestore(

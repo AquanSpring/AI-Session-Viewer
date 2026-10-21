@@ -21,6 +21,13 @@ pub struct BackupMetadata {
     pub created_at: String,
     pub db_files: Vec<String>,
     pub changed_session_files: Vec<String>,
+    /// `repair` for config-only repairs; older backups default to `sync`.
+    #[serde(default = "default_kind")]
+    pub kind: String,
+}
+
+fn default_kind() -> String {
+    "sync".to_string()
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug)]
@@ -67,6 +74,7 @@ pub fn list_backups(codex_home: &Path) -> Vec<BackupSummary> {
                 created_at: meta.created_at,
                 target_provider: meta.target_provider,
                 changed_session_count: meta.changed_session_files.len() as u32,
+                kind: meta.kind,
             })
         })
         .collect();

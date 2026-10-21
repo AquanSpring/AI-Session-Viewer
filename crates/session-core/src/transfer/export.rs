@@ -77,7 +77,7 @@ fn is_selected(selection: &SourceSelection, project_id: &str) -> bool {
         .is_none_or(|ids| ids.iter().any(|id| id == project_id))
 }
 
-fn project_infos(projects: Result<Vec<ProjectEntry>, String>) -> HashMap<String, ProjectEntry> {
+pub(super) fn project_infos(projects: Result<Vec<ProjectEntry>, String>) -> HashMap<String, ProjectEntry> {
     projects
         .unwrap_or_default()
         .into_iter()
@@ -97,7 +97,7 @@ fn project_name(info: Option<&ProjectEntry>, path: Option<&str>, id: &str) -> St
 
 /// The cwd Claude ran in: index `originalPath`, else the first `cwd` row of a
 /// transcript, else the provider's decoded display path.
-fn claude_project_path(dir: &Path, sessions: &[PathBuf], info: Option<&ProjectEntry>) -> Option<String> {
+pub(super) fn claude_project_path(dir: &Path, sessions: &[PathBuf], info: Option<&ProjectEntry>) -> Option<String> {
     let from_index = fs::read(dir.join("sessions-index.json"))
         .ok()
         .and_then(|bytes| serde_json::from_slice::<Value>(&bytes).ok())

@@ -262,18 +262,21 @@ fn contains(haystack: &[u8], needle: &[u8]) -> bool {
     !needle.is_empty() && haystack.windows(needle.len()).any(|window| window == needle)
 }
 
-/// Copy a transcript line by line, rewriting cwd fields only on lines that
-/// mention the old path; every other byte is preserved.
-fn rewrite_jsonl(
+/// Copy a transcript line by line, applying `rewrite` (the cwd fields for
+/// transcripts) only to lines that mention the old path; every
+/// other byte is preserved. Returns `(bytes read, lines rewritten)`.
+pub(super) fn rewrite_jsonl(
     input: impl Read,
     output: &mut impl Write,
     remap: &Remap,
+    rewrite: fn(&mut Value, &Remap) -> bool,
     job: &JobHandle,
-) -> std::io::Result<u64> {
+) -> std::io::Result<(u64, usize)> {
     let needle = remap.needle();
     let mut reader = BufReader::with_capacity(256 * 1024, input);
     let mut line = Vec::new();
     let mut total = 0u64;
+    let mut changed = 0usize;
     loop {
         if job.cancelled() {
             return Err(std::io::Error::other(CANCELLED));
@@ -289,18 +292,21 @@ fn rewrite_jsonl(
             std::str::from_utf8(&line).ok().and_then(|text| {
                 let body = text.trim_end_matches(['\r', '\n']);
                 let mut row: Value = serde_json::from_str(body).ok()?;
-                archive::rewrite_cwd_fields(&mut row, remap)
+                rewrite(&mut row, remap)
                     .then(|| format!("{row}{}", &text[body.len()..]))
             })
         } else {
             None
         };
         match rewritten {
-            Some(text) => output.write_all(text.as_bytes())?,
+            Some(text) => {
+                changed += 1;
+                output.write_all(text.as_bytes())?
+            }
             None => output.write_all(&line)?,
         }
     }
-    Ok(total)
+    Ok((total, changed))
 }
 
 /// Extract one archive file to `dest` (which must not exist) through a
@@ -334,7 +340,9 @@ fn write_entry(
     let is_jsonl = name.ends_with(".jsonl");
     let result = (|| -> std::io::Result<u64> {
         let read = match remap {
-            Some(remap) if is_jsonl => rewrite_jsonl(&mut entry, &mut writer, remap, job)?,
+            Some(remap) if is_jsonl => {
+                rewrite_jsonl(&mut entry, &mut writer, remap, archive::rewrite_cwd_fields, job)?.0
+            }
             Some(remap) if name == "summary.json" => {
                 let mut bytes = Vec::new();
                 entry.read_to_end(&mut bytes)?;
@@ -412,7 +420,7 @@ fn copy_tree(source: &Path, destination: &Path) -> std::io::Result<()> {
 }
 
 /// Move a file or directory, falling back to copy + delete across devices.
-fn move_path(source: &Path, destination: &Path) -> Result<(), String> {
+pub(super) fn move_path(source: &Path, destination: &Path) -> Result<(), String> {
     if let Some(parent) = destination.parent() {
         fs::create_dir_all(parent).map_err(|e| format!("创建备份目录失败：{e}"))?;
     }
@@ -428,7 +436,7 @@ fn move_path(source: &Path, destination: &Path) -> Result<(), String> {
     removed.map_err(|e| format!("移除旧文件 {} 失败：{e}", source.display()))
 }
 
-fn write_json_atomic(path: &Path, value: &Value) -> Result<(), String> {
+pub(super) fn write_json_atomic(path: &Path, value: &Value) -> Result<(), String> {
     let temporary = path.with_extension("json.asv-import");
     fs::write(&temporary, value.to_string()).map_err(|e| format!("写入 {} 失败：{e}", path.display()))?;
     fs::rename(&temporary, path).map_err(|e| {
