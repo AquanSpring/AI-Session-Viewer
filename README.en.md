@@ -22,7 +22,7 @@ The viewer reads local session files. Browsing does not upload them to a cloud s
 
 **Interface language:** Chinese is the default on every system. To use English, click **设置 (Settings)** in the lower-left corner, open **显示设置 (Display)**, and select **English** under **界面语言 / Language**. The change takes effect immediately and is remembered after restarting. Session content and custom names are not translated.
 
-**What's new in v3.1.0:** **session transfer** — export all sessions of the selected sources (or chosen projects) into one `.zip` on the old computer and import it on the new one to keep browsing and continue the conversations. Importing previews conflicts and project paths, can map a project to a different local directory (recorded working directories are rewritten), skips sessions that already exist by default, and backs up local copies before overwriting. All four sources are supported, aliases, tags, and bookmarks come along, and both the desktop app and the web server stream multi-gigabyte archives. See [CHANGELOG.md](./CHANGELOG.md#310---2026-10-21).
+**What's new in v3.1.1:** **move project** — relocate a project folder on this machine and take its Claude Code, Codex, Grok, and Oh My Pi sessions, project settings, trust entries, and bookmarks along, so you can keep chatting in the new location. Changes are previewed first, backed up before running, and an interrupted move can simply be run again. Codex provider sync gains **repair old sessions**: after switching between a third-party login and the official login, old sessions that fail with `Model provider not found` get a compatibility provider definition in one click, without touching session files. Since v3.1.0, **session transfer** moves sessions between computers as one `.zip`. See [CHANGELOG.md](./CHANGELOG.md#311---2026-10-21).
 
 > ⚠️ **Upgrading from 2.x:** 3.0.0 contains breaking changes (web bind address, token requirement, chat scope). See [CHANGELOG.md](./CHANGELOG.md#300---2026-09-30).
 
@@ -81,10 +81,10 @@ Options, Docker, security advice, and multiple machines: [docs/deployment.en.md]
 | Reading | Markdown and highlighting, tool viewers, question index and position rail, question summary, Codex trace |
 | Organizing | Aliases, tags, bookmarks, export (JSON / Markdown / HTML), batch delete to the recycle bin |
 | Keep working | One-click terminal resume, fork from any question; in-app chat for Claude and Codex |
-| Session transfer | Export whole sources or chosen projects into one `.zip` and import it on another computer, with path mapping and skip / backup-and-overwrite on conflicts |
+| Session transfer | Export whole sources or chosen projects into one `.zip` and import it on another computer, with path mapping and skip / backup-and-overwrite on conflicts; move a project folder on this machine and its sessions follow |
 | Search and stats | Cross-project full-text search; Claude / Codex tokens, costs, and per-request bills |
 | Web and machines | `session-web` in the browser, multiple nodes, token and origin checks |
-| More | Skills / MCP / plugin management, Codex provider sync, invalid-item cleanup, Chinese/English UI, in-app updates |
+| More | Skills / MCP / plugin management, Codex provider sync and old-session repair, invalid-item cleanup, Chinese/English UI, in-app updates |
 
 Full details are in [docs/features.en.md](./docs/features.en.md).
 

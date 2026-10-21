@@ -8,6 +8,26 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/), and this
 
 ---
 
+## [3.1.1] - 2026-10-21
+
+### Added
+
+- **项目搬家（本机）**：「会话迁移」页新增「项目搬家」，在本机把项目文件夹换个位置（改名、整理目录），各 AI 工具的会话随之迁移，搬家后可在新位置直接续聊。
+  - 先预览影响（各来源受影响的会话数、Claude / Codex 项目设置与线程记录、收藏），再选择由本工具移动文件夹（需在同一磁盘分区）或「文件夹已手动移动」只更新记录；原目录的子目录项目一并搬走。
+  - **Claude**：`~/.claude/projects/<编码路径>` 重命名为新路径的编码（新目录已存在时合并，同名文件保留原位置），会话 `cwd`、`sessions-index.json`、`~/.claude.json` 项目设置与 `history.jsonl` 一并更新。
+  - **Codex**：rollout 中的工作目录（含 `thread_settings`、`runtime_workspace_roots`、`world_state`）、`state_5.sqlite` 的 `threads.cwd`、`config.toml` 的 `[projects."<路径>"]` 信任设置与 Desktop 工作区列表。
+  - **Grok / Oh My Pi**：会话 `cwd`，按路径命名的项目目录可验证时一并改名；指向搬走会话的收藏同步更新。
+  - 消息正文与文件修改时间不变；执行前把各工具的配置与索引备份到 `~/.claude-code-viewer/transfer/backups/relocate-<时间戳>/`。每一步可重复执行，中途取消或失败后选择「文件夹已手动移动」再执行即可补完；正在写入的会话文件会跳过并提示。
+- **修复旧会话（Codex）**：「Provider 同步」页新增「修复旧会话」。在第三方登录与官方登录之间切换后，旧会话记录的 provider（如 `custom`）在 `config.toml` 中已无定义，Codex 打开旧会话报 ``Model provider `custom` not found``。页面列出会话引用、但既非内置也未定义的 provider，并在 `config.toml` 末尾追加兼容定义：默认沿用当前 OpenAI 登录与默认地址（不写 `base_url`），也可复制一个已配置 provider 的设置。只追加不改已有行，写入前校验 TOML 并检测并发修改；会话文件、SQLite 与登录信息不动，修复前备份 `config.toml`，可在备份历史中恢复。
+
+### Fixed
+
+- Provider 同步改为与 Codex 一致地读取 `CODEX_HOME`（未设置时为 `~/.codex`），此前总是读取 `~/.codex`。
+- 会话迁移导入时同样改写新版 Codex rollout 中 `thread_settings`、`runtime_workspace_roots` 与 `world_state` 的工作目录，映射到本机目录后续聊不再指向旧路径。
+- Windows 路径映射同时匹配 `\` 与 `/` 分隔符。
+
+---
+
 ## [3.1.0] - 2026-10-21
 
 ### Added
