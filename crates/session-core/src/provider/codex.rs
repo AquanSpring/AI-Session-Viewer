@@ -103,14 +103,14 @@ fn leading_date(seg: &str) -> Option<String> {
 /// originator but don't live under the `Codex/<date>` scratch tree, so the path
 /// shape is what disambiguates.
 fn direct_chat_date(fm: &CodexFileMeta) -> Option<String> {
-    if fm.originator.as_deref() != Some("Codex Desktop") || fm.cwd.is_empty() {
+    direct_chat_date_for_cwd(&fm.cwd, fm.originator.as_deref())
+}
+
+fn direct_chat_date_for_cwd(cwd: &str, originator: Option<&str>) -> Option<String> {
+    if originator != Some("Codex Desktop") || cwd.is_empty() {
         return None;
     }
-    let segs: Vec<&str> = fm
-        .cwd
-        .split(['/', '\\'])
-        .filter(|s| !s.is_empty())
-        .collect();
+    let segs: Vec<&str> = cwd.split(['/', '\\']).filter(|s| !s.is_empty()).collect();
     for (i, seg) in segs.iter().enumerate() {
         if seg.eq_ignore_ascii_case("Codex") {
             if let Some(date) = segs.get(i + 1).and_then(|next| leading_date(next)) {
@@ -446,6 +446,122 @@ pub fn scan_all_session_files() -> Vec<PathBuf> {
     }
 
     files
+}
+
+fn is_recently_modified(path: &Path) -> bool {
+    fs::metadata(path)
+        .and_then(|metadata| metadata.modified())
+        .and_then(|modified| {
+            std::time::SystemTime::now()
+                .duration_since(modified)
+                .map_err(|error| std::io::Error::other(error.to_string()))
+        })
+        .map(|age| age.as_secs() < 300)
+        .unwrap_or(true)
+}
+
+fn is_empty_dir(path: &Path) -> bool {
+    fs::read_dir(path)
+        .map(|mut entries| entries.next().is_none())
+        .unwrap_or(false)
+}
+
+fn date_component_value(path: &Path, width: usize, min: u32, max: u32) -> Option<u32> {
+    let value = path.file_name().and_then(|name| name.to_str())?;
+    if value.len() != width || !value.bytes().all(|byte| byte.is_ascii_digit()) {
+        return None;
+    }
+    value
+        .parse::<u32>()
+        .ok()
+        .filter(|number| (min..=max).contains(number))
+}
+
+fn is_valid_codex_date(year: u32, month: u32, day: u32) -> bool {
+    let max_day = match month {
+        1 | 3 | 5 | 7 | 8 | 10 | 12 => 31,
+        4 | 6 | 9 | 11 => 30,
+        2 if year.is_multiple_of(400) || (year.is_multiple_of(4) && !year.is_multiple_of(100)) => {
+            29
+        }
+        2 => 28,
+        _ => return false,
+    };
+    (1..=max_day).contains(&day)
+}
+
+fn collect_empty_session_dirs(root: &Path) -> Vec<PathBuf> {
+    let mut dirs = Vec::new();
+    let Ok(years) = fs::read_dir(root) else {
+        return dirs;
+    };
+    for year in years.flatten() {
+        let year_path = year.path();
+        let Some(year_number) = date_component_value(&year_path, 4, 1, 9999) else {
+            continue;
+        };
+        if !year.file_type().map(|kind| kind.is_dir()).unwrap_or(false) {
+            continue;
+        }
+        let Ok(months) = fs::read_dir(&year_path) else {
+            continue;
+        };
+        for month in months.flatten() {
+            let month_path = month.path();
+            let Some(month_number) = date_component_value(&month_path, 2, 1, 12) else {
+                continue;
+            };
+            if !month.file_type().map(|kind| kind.is_dir()).unwrap_or(false) {
+                continue;
+            }
+            let Ok(days) = fs::read_dir(&month_path) else {
+                continue;
+            };
+            for day in days.flatten() {
+                let day_path = day.path();
+                let Some(day_number) = date_component_value(&day_path, 2, 1, 31) else {
+                    continue;
+                };
+                if day.file_type().map(|kind| kind.is_dir()).unwrap_or(false)
+                    && is_valid_codex_date(year_number, month_number, day_number)
+                    && is_empty_dir(&day_path)
+                    && !is_recently_modified(&day_path)
+                {
+                    dirs.push(day_path);
+                }
+            }
+        }
+    }
+    dirs
+}
+
+/// Scan the Codex date tree for empty directories left behind after rollout
+/// files were archived or deleted, and move those directories to the recycle
+/// bin. Non-empty directories are never touched.
+pub fn cleanup_all_orphan_dirs() -> Result<usize, String> {
+    let sessions_dir =
+        get_sessions_dir().ok_or_else(|| "Cannot find Codex sessions directory".to_string())?;
+    if !sessions_dir.exists() {
+        return Ok(0);
+    }
+
+    let mut moved = 0usize;
+    for path in collect_empty_session_dirs(&sessions_dir) {
+        match crate::recyclebin::move_to_recyclebin(
+            &path,
+            "orphanDir",
+            "OrphanDir",
+            "codex",
+            &sessions_dir.to_string_lossy(),
+            None,
+            None,
+        ) {
+            Ok(_) => moved += 1,
+            Err(error) => eprintln!("[codex::cleanup_orphan] Failed to move {path:?}: {error}"),
+        }
+    }
+
+    Ok(moved)
 }
 
 fn short_name_from_path(path: &str) -> String {
@@ -1103,33 +1219,29 @@ pub fn delete_project(project_id: &str) -> Result<super::claude::DeleteResult, S
         short_name_from_path(project_id)
     };
 
-    let mut sessions_deleted = 0;
-    for s in &sessions {
-        let path = Path::new(&s.file_path);
-        if !path.exists() {
-            continue;
-        }
-        match crate::recyclebin::move_to_recyclebin(
-            path,
-            "project",
-            "ManualDelete",
+    let existing_sessions: Vec<_> = sessions
+        .iter()
+        .filter(|session| Path::new(&session.file_path).is_file())
+        .collect();
+    let paths: Vec<PathBuf> = existing_sessions
+        .iter()
+        .map(|session| PathBuf::from(&session.file_path))
+        .collect();
+
+    if !paths.is_empty() {
+        crate::recyclebin::move_group_to_recyclebin(
+            &paths,
             "codex",
             project_id,
             None,
-            Some(project_name.clone()),
-        ) {
-            Ok(_) => {
-                sessions_deleted += 1;
-                let _ = crate::metadata::remove_session_meta("codex", project_id, &s.session_id);
-            }
-            Err(e) => {
-                eprintln!(
-                    "[codex::delete_project] Failed to recycle {:?}: {}",
-                    path, e
-                );
-            }
+            Some(project_name),
+        )?;
+        for session in existing_sessions {
+            let _ = crate::metadata::remove_session_meta("codex", project_id, &session.session_id);
         }
     }
+
+    let sessions_deleted = paths.len();
 
     invalidate_sessions_cache();
 
@@ -2075,6 +2187,54 @@ mod tests {
             }
         });
         fs::write(path, format!("{row}\n")).unwrap();
+    }
+
+    #[test]
+    fn direct_chat_date_uses_codex_desktop_scratch_path() {
+        assert_eq!(
+            direct_chat_date_for_cwd("/home/user/Codex/2026-10-23/chat", Some("Codex Desktop"))
+                .as_deref(),
+            Some("2026-10-23")
+        );
+        assert_eq!(
+            direct_chat_date_for_cwd("/home/user/projects/chat", Some("Codex Desktop")),
+            None
+        );
+        assert_eq!(
+            direct_chat_date_for_cwd("/home/user/Codex/2026-10-23/chat", Some("codex-tui")),
+            None
+        );
+    }
+
+    #[test]
+    fn empty_directory_detection_ignores_non_empty_dirs() {
+        let unique = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let root = std::env::temp_dir().join(format!(
+            "ai-session-viewer-codex-empty-dirs-{}-{unique}",
+            std::process::id()
+        ));
+        let empty = root.join("2026").join("10").join("23");
+        let non_empty = root.join("2026").join("10").join("24");
+        fs::create_dir_all(&empty).unwrap();
+        fs::create_dir_all(&non_empty).unwrap();
+        fs::write(non_empty.join("rollout.jsonl"), "data").unwrap();
+
+        assert!(is_empty_dir(&empty));
+        assert!(!is_empty_dir(&non_empty));
+        assert_eq!(
+            date_component_value(&root.join("2026"), 4, 1, 9999),
+            Some(2026)
+        );
+        assert_eq!(date_component_value(&root.join("10"), 2, 1, 12), Some(10));
+        assert_eq!(date_component_value(&root.join("99"), 2, 1, 12), None);
+        assert!(is_valid_codex_date(2024, 2, 29));
+        assert!(!is_valid_codex_date(2026, 2, 29));
+        assert!(!is_valid_codex_date(2026, 4, 31));
+
+        fs::remove_dir_all(root).unwrap();
     }
 
     #[test]

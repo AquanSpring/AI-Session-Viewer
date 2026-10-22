@@ -6,6 +6,12 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/), and this
 
 ## [Unreleased]
 
+### Fixed
+
+- Linux 续聊可正确向 xterm 传递命令参数，并支持 GNOME Console（`kgx`）；应用启动时会话目录尚不存在时，文件监听器会在目录创建后自动注册监听。
+- Codex 回收站支持扫描并回收过期的空日期目录；桌面端与 Web 端均可使用。
+- 修复 Codex 会话删除时的项目校验，并加强回收站移动失败后的回滚保护；删除失败时保留对话框并显示错误，避免误以为删除成功。
+
 ---
 
 ## [3.1.1] - 2026-10-21

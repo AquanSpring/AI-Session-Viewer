@@ -12,8 +12,9 @@ use session_core::watcher_batch::{collect_until_quiet, is_session_file_change};
 /// Minimum interval between emitting fs-change events to the frontend.
 const DEBOUNCE_DURATION: Duration = Duration::from_millis(300);
 const MAX_BATCH_DURATION: Duration = Duration::from_secs(1);
+const WATCH_REFRESH_INTERVAL: Duration = Duration::from_secs(5);
 
-/// Start watching Claude, Codex and Grok session directories for changes.
+/// Start watching Claude, Codex, Grok and OMP session directories for changes.
 /// Emits "fs-change" events to the frontend when files are modified.
 /// Events are debounced to avoid flooding the frontend during batch operations.
 pub fn start_watcher(app_handle: AppHandle) -> Result<(), String> {
@@ -21,17 +22,6 @@ pub fn start_watcher(app_handle: AppHandle) -> Result<(), String> {
     let codex_dir = codex::get_sessions_dir();
     let grok_dir = grok::get_sessions_dir();
     let omp_dir = omp::get_sessions_dir();
-
-    // At least one directory must exist
-    if claude_dir.as_ref().map(|dir| dir.exists()).unwrap_or(false)
-        || codex_dir.as_ref().map(|dir| dir.exists()).unwrap_or(false)
-        || grok_dir.as_ref().map(|dir| dir.exists()).unwrap_or(false)
-        || omp_dir.as_ref().map(|dir| dir.exists()).unwrap_or(false)
-    {
-        // ok, proceed
-    } else {
-        return Err("Neither Claude nor Codex directory exists".to_string());
-    }
 
     std::thread::spawn(move || {
         let (tx, rx) = mpsc::channel::<notify::Result<Event>>();
@@ -44,35 +34,20 @@ pub fn start_watcher(app_handle: AppHandle) -> Result<(), String> {
             }
         };
 
-        // Watch Claude projects directory
-        if let Some(ref dir) = claude_dir {
-            if dir.exists() {
-                if let Err(e) = watcher.watch(dir, RecursiveMode::Recursive) {
-                    eprintln!("Failed to watch Claude directory: {}", e);
-                }
-            }
-        }
+        let directories = [&claude_dir, &codex_dir, &grok_dir, &omp_dir];
+        let mut watched = [false; 4];
 
-        // Watch Codex sessions directory
-        if let Some(ref dir) = codex_dir {
-            if dir.exists() {
-                if let Err(e) = watcher.watch(dir, RecursiveMode::Recursive) {
-                    eprintln!("Failed to watch Codex directory: {}", e);
-                }
-            }
-        }
-        if let Some(ref dir) = grok_dir {
-            if dir.exists() {
-                let _ = watcher.watch(dir, RecursiveMode::Recursive);
-            }
-        }
-        if let Some(ref dir) = omp_dir {
-            if dir.exists() {
-                let _ = watcher.watch(dir, RecursiveMode::Recursive);
-            }
-        }
+        loop {
+            // A provider may create its session root after the application
+            // starts. Retry missing roots periodically instead of giving up
+            // at startup when the user has no sessions yet.
+            sync_watches(&mut watcher, &directories, &mut watched);
 
-        while let Ok(first) = rx.recv() {
+            let first = match rx.recv_timeout(WATCH_REFRESH_INTERVAL) {
+                Ok(event) => event,
+                Err(mpsc::RecvTimeoutError::Timeout) => continue,
+                Err(mpsc::RecvTimeoutError::Disconnected) => break,
+            };
             let events =
                 collect_until_quiet(first, DEBOUNCE_DURATION, MAX_BATCH_DURATION, |timeout| {
                     rx.recv_timeout(timeout)
@@ -174,4 +149,60 @@ pub fn start_watcher(app_handle: AppHandle) -> Result<(), String> {
     });
 
     Ok(())
+}
+
+fn sync_watches(
+    watcher: &mut RecommendedWatcher,
+    directories: &[&Option<PathBuf>; 4],
+    watched: &mut [bool; 4],
+) {
+    for (index, directory) in directories.iter().enumerate() {
+        let Some(directory) = directory else {
+            continue;
+        };
+        if !directory.exists() {
+            if watched[index] {
+                let _ = watcher.unwatch(directory);
+                watched[index] = false;
+            }
+        } else if !watched[index] {
+            match watcher.watch(directory, RecursiveMode::Recursive) {
+                Ok(()) => watched[index] = true,
+                Err(error) => eprintln!("Failed to watch {:?}: {}", directory, error),
+            }
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::fs;
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    #[test]
+    fn watches_provider_root_created_after_startup() {
+        let unique = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let directory = std::env::temp_dir().join(format!(
+            "ai-session-viewer-watch-late-root-{}-{unique}",
+            std::process::id()
+        ));
+        let directories = [Some(directory.clone()), None, None, None];
+        let mut watched = [false; 4];
+        let (tx, _rx) = mpsc::channel::<notify::Result<Event>>();
+        let mut watcher = RecommendedWatcher::new(tx, Config::default()).unwrap();
+
+        sync_watches(&mut watcher, &directories.each_ref(), &mut watched);
+        assert!(!watched[0]);
+
+        fs::create_dir_all(&directory).unwrap();
+        sync_watches(&mut watcher, &directories.each_ref(), &mut watched);
+        assert!(watched[0]);
+
+        drop(watcher);
+        fs::remove_dir_all(directory).unwrap();
+    }
 }

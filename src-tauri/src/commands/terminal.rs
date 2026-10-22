@@ -39,6 +39,34 @@ fn resume_command(source: &str, session_id: &str) -> Result<String, String> {
     }
 }
 
+#[cfg(target_os = "linux")]
+fn linux_terminal_commands(cmd_str: &str) -> Vec<(&'static str, Vec<String>)> {
+    let xfce_arg = format!("bash -c '{}'", posix_single_quote(cmd_str));
+    vec![
+        // GNOME Console (kgx) uses the same `-- COMMAND ...` form as
+        // GNOME Terminal and is the default terminal on newer GNOME desktops.
+        (
+            "kgx",
+            vec!["--".into(), "bash".into(), "-c".into(), cmd_str.into()],
+        ),
+        (
+            "gnome-terminal",
+            vec!["--".into(), "bash".into(), "-c".into(), cmd_str.into()],
+        ),
+        (
+            "konsole",
+            vec!["-e".into(), "bash".into(), "-c".into(), cmd_str.into()],
+        ),
+        ("xfce4-terminal", vec!["-e".into(), xfce_arg]),
+        // xterm expects the executable and its arguments as separate argv
+        // entries, not as one command string.
+        (
+            "xterm",
+            vec!["-e".into(), "bash".into(), "-c".into(), cmd_str.into()],
+        ),
+    ]
+}
+
 #[tauri::command(async)]
 pub fn resume_session(
     source: String,
@@ -155,19 +183,10 @@ fn open_terminal(project_path: &str, cli_cmd: &str, _shell: Option<&str>) -> Res
         let path_q = posix_single_quote(project_path);
         let cmd_str = format!("cd '{}' && {}", path_q, cli_cmd);
 
-        let xfce_arg = format!("bash -c '{}'", posix_single_quote(&cmd_str));
-        let xterm_arg = format!("bash -c '{}'", posix_single_quote(&cmd_str));
-        let terminals: [(&str, &[&str]); 4] = [
-            ("gnome-terminal", &["--", "bash", "-c", &cmd_str]),
-            ("konsole", &["-e", "bash", "-c", &cmd_str]),
-            ("xfce4-terminal", &["-e", &xfce_arg]),
-            ("xterm", &["-e", &xterm_arg]),
-        ];
-
         let mut launched = false;
-        for (terminal, args) in &terminals {
+        for (terminal, args) in linux_terminal_commands(&cmd_str) {
             if Command::new(terminal)
-                .args(*args)
+                .args(args)
                 .process_group(0)
                 .spawn()
                 .is_ok()
@@ -317,11 +336,37 @@ fn normalize_path(path: &str) -> String {
 mod tests {
     use super::{resume_command, validate_shell_safe_session_id};
 
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn linux_terminal_arguments_support_xterm_and_kgx() {
+        let commands = super::linux_terminal_commands("cd '/tmp/project' && codex resume id");
+        let xterm = commands.iter().find(|(name, _)| *name == "xterm").unwrap();
+        let kgx = commands.iter().find(|(name, _)| *name == "kgx").unwrap();
+
+        assert_eq!(
+            xterm.1,
+            ["-e", "bash", "-c", "cd '/tmp/project' && codex resume id"]
+        );
+        assert_eq!(
+            kgx.1,
+            ["--", "bash", "-c", "cd '/tmp/project' && codex resume id"]
+        );
+    }
+
     #[test]
     fn shell_safe_session_id_rejects_metacharacters() {
         assert!(validate_shell_safe_session_id("019f5569-e530-7ea3-8525-9e87d451a788").is_ok());
         assert!(validate_shell_safe_session_id("thread_abc.1").is_ok());
-        for bad in ["a;rm -rf ~", "a&calc", "a|b", "$(id)", "`id`", "a b", "a'b", "a\"b"] {
+        for bad in [
+            "a;rm -rf ~",
+            "a&calc",
+            "a|b",
+            "$(id)",
+            "`id`",
+            "a b",
+            "a'b",
+            "a\"b",
+        ] {
             assert!(validate_shell_safe_session_id(bad).is_err(), "{bad}");
         }
     }

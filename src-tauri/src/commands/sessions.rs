@@ -5,7 +5,6 @@ use session_core::paths::validate_session_file;
 use session_core::provider::{claude, codex, grok, omp};
 use session_core::recyclebin;
 
-
 #[tauri::command]
 pub async fn get_sessions(
     source: String,
@@ -97,6 +96,21 @@ pub fn delete_session(
                 if metadata.id != session_id {
                     return Err(
                         "Session id does not match the requested OMP session file".to_string()
+                    );
+                }
+            } else if source == "codex" {
+                let metadata = codex::extract_session_meta(&path)
+                    .ok_or_else(|| "Failed to read Codex session metadata".to_string())?;
+                if metadata.id != session_id {
+                    return Err(
+                        "Session id does not match the requested Codex session file".to_string()
+                    );
+                }
+                if !project_id.is_empty()
+                    && codex::project_id_for_session(&path).as_deref() != Some(project_id.as_str())
+                {
+                    return Err(
+                        "Session file does not belong to the requested Codex project".to_string(),
                     );
                 }
             }

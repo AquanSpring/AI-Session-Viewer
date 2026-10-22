@@ -55,6 +55,7 @@ pub async fn cleanup_orphan_dirs(
     let source = params.source;
     let count = tokio::task::spawn_blocking(move || match source.as_str() {
         "claude" => session_core::provider::claude::cleanup_all_orphan_dirs(),
+        "codex" => session_core::provider::codex::cleanup_all_orphan_dirs(),
         _ => Err(format!(
             "Orphan dir cleanup not supported for source: {}",
             source
