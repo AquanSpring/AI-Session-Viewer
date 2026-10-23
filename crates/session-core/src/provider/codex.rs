@@ -102,10 +102,6 @@ fn leading_date(seg: &str) -> Option<String> {
 /// return its date bucket. Real projects opened in Codex Desktop share the same
 /// originator but don't live under the `Codex/<date>` scratch tree, so the path
 /// shape is what disambiguates.
-fn direct_chat_date(fm: &CodexFileMeta) -> Option<String> {
-    direct_chat_date_for_cwd(&fm.cwd, fm.originator.as_deref())
-}
-
 fn direct_chat_date_for_cwd(cwd: &str, originator: Option<&str>) -> Option<String> {
     if originator != Some("Codex Desktop") || cwd.is_empty() {
         return None;
@@ -448,7 +444,10 @@ pub fn scan_all_session_files() -> Vec<PathBuf> {
     files
 }
 
-fn is_recently_modified(path: &Path) -> bool {
+/// Empty date directories younger than this may be about to receive a rollout.
+const EMPTY_DIR_MIN_AGE_SECS: u64 = 300;
+
+fn is_recently_modified(path: &Path, min_age_secs: u64) -> bool {
     fs::metadata(path)
         .and_then(|metadata| metadata.modified())
         .and_then(|modified| {
@@ -456,8 +455,12 @@ fn is_recently_modified(path: &Path) -> bool {
                 .duration_since(modified)
                 .map_err(|error| std::io::Error::other(error.to_string()))
         })
-        .map(|age| age.as_secs() < 300)
+        .map(|age| age.as_secs() < min_age_secs)
         .unwrap_or(true)
+}
+
+fn is_dir_entry(entry: &fs::DirEntry) -> bool {
+    entry.file_type().map(|kind| kind.is_dir()).unwrap_or(false)
 }
 
 fn is_empty_dir(path: &Path) -> bool {
@@ -490,17 +493,35 @@ fn is_valid_codex_date(year: u32, month: u32, day: u32) -> bool {
     (1..=max_day).contains(&day)
 }
 
-fn collect_empty_session_dirs(root: &Path) -> Vec<PathBuf> {
-    let mut dirs = Vec::new();
+/// `(year, month)` pairs Codex may be writing into right now (local and UTC
+/// calendars can differ around midnight); their parent directories are kept
+/// even when empty.
+fn active_months() -> [(u32, u32); 2] {
+    use chrono::Datelike;
+    let local = chrono::Local::now();
+    let utc = chrono::Utc::now();
+    [
+        (local.year() as u32, local.month()),
+        (utc.year() as u32, utc.month()),
+    ]
+}
+
+/// Remove empty `YYYY/MM/DD` directories older than `min_age_secs`, then the
+/// `YYYY/MM` and `YYYY` directories that became empty (except the active
+/// months). Returns how many directories were removed. `fs::remove_dir`
+/// refuses non-empty directories, so a rollout written in the meantime is
+/// never lost.
+fn remove_empty_session_dirs(root: &Path, min_age_secs: u64, active: &[(u32, u32)]) -> usize {
+    let mut removed = 0usize;
     let Ok(years) = fs::read_dir(root) else {
-        return dirs;
+        return removed;
     };
     for year in years.flatten() {
         let year_path = year.path();
         let Some(year_number) = date_component_value(&year_path, 4, 1, 9999) else {
             continue;
         };
-        if !year.file_type().map(|kind| kind.is_dir()).unwrap_or(false) {
+        if !is_dir_entry(&year) {
             continue;
         }
         let Ok(months) = fs::read_dir(&year_path) else {
@@ -511,7 +532,7 @@ fn collect_empty_session_dirs(root: &Path) -> Vec<PathBuf> {
             let Some(month_number) = date_component_value(&month_path, 2, 1, 12) else {
                 continue;
             };
-            if !month.file_type().map(|kind| kind.is_dir()).unwrap_or(false) {
+            if !is_dir_entry(&month) {
                 continue;
             }
             let Ok(days) = fs::read_dir(&month_path) else {
@@ -522,46 +543,47 @@ fn collect_empty_session_dirs(root: &Path) -> Vec<PathBuf> {
                 let Some(day_number) = date_component_value(&day_path, 2, 1, 31) else {
                     continue;
                 };
-                if day.file_type().map(|kind| kind.is_dir()).unwrap_or(false)
+                if is_dir_entry(&day)
                     && is_valid_codex_date(year_number, month_number, day_number)
                     && is_empty_dir(&day_path)
-                    && !is_recently_modified(&day_path)
+                    && !is_recently_modified(&day_path, min_age_secs)
+                    && fs::remove_dir(&day_path).is_ok()
                 {
-                    dirs.push(day_path);
+                    removed += 1;
                 }
             }
+            if !active.contains(&(year_number, month_number))
+                && is_empty_dir(&month_path)
+                && fs::remove_dir(&month_path).is_ok()
+            {
+                removed += 1;
+            }
+        }
+        if !active.iter().any(|(year, _)| *year == year_number)
+            && is_empty_dir(&year_path)
+            && fs::remove_dir(&year_path).is_ok()
+        {
+            removed += 1;
         }
     }
-    dirs
+    removed
 }
 
 /// Scan the Codex date tree for empty directories left behind after rollout
-/// files were archived or deleted, and move those directories to the recycle
-/// bin. Non-empty directories are never touched.
+/// files were archived or deleted, and remove them. They hold no data, so
+/// they're deleted directly instead of cluttering the recycle bin with one
+/// entry per directory. Non-empty directories are never touched.
 pub fn cleanup_all_orphan_dirs() -> Result<usize, String> {
     let sessions_dir =
         get_sessions_dir().ok_or_else(|| "Cannot find Codex sessions directory".to_string())?;
     if !sessions_dir.exists() {
         return Ok(0);
     }
-
-    let mut moved = 0usize;
-    for path in collect_empty_session_dirs(&sessions_dir) {
-        match crate::recyclebin::move_to_recyclebin(
-            &path,
-            "orphanDir",
-            "OrphanDir",
-            "codex",
-            &sessions_dir.to_string_lossy(),
-            None,
-            None,
-        ) {
-            Ok(_) => moved += 1,
-            Err(error) => eprintln!("[codex::cleanup_orphan] Failed to move {path:?}: {error}"),
-        }
-    }
-
-    Ok(moved)
+    Ok(remove_empty_session_dirs(
+        &sessions_dir,
+        EMPTY_DIR_MIN_AGE_SECS,
+        &active_months(),
+    ))
 }
 
 fn short_name_from_path(path: &str) -> String {
@@ -920,19 +942,30 @@ fn file_meta_for(path: &Path) -> Option<CodexFileMeta> {
 /// - `<codex-unrooted>/DATE` when it has no recorded cwd,
 /// - otherwise its real cwd.
 fn project_key_for(fm: &CodexFileMeta) -> String {
-    if let Some(date) = direct_chat_date(fm) {
+    project_key_from(&fm.cwd, fm.originator.as_deref(), fm.date.as_deref())
+}
+
+fn project_key_from(cwd: &str, originator: Option<&str>, date: Option<&str>) -> String {
+    if let Some(date) = direct_chat_date_for_cwd(cwd, originator) {
         direct_project_id(&date)
-    } else if fm.cwd.is_empty() {
-        virtual_project_id(fm.date.as_deref().unwrap_or("unknown"))
+    } else if cwd.is_empty() {
+        virtual_project_id(date.unwrap_or("unknown"))
     } else {
-        fm.cwd.clone()
+        cwd.to_string()
     }
 }
 
-/// Resolve the destination bucket after a native fork (direct-chat and
-/// unrooted sessions can belong to a different bucket than their parent).
+/// Resolve the project bucket of one rollout file — after a native fork
+/// (direct-chat and unrooted sessions can belong to a different bucket than
+/// their parent) or when validating a delete. Only the `session_meta` header
+/// is read, so large rollouts aren't scanned in full.
 pub fn project_id_for_session(path: &Path) -> Option<String> {
-    file_meta_for(path).map(|meta| project_key_for(&meta))
+    let meta = extract_session_meta(path)?;
+    Some(project_key_from(
+        &meta.cwd,
+        meta.originator.as_deref(),
+        extract_date_from_path(path).as_deref(),
+    ))
 }
 
 /// Build the per-file index with a single parallel pass over every rollout
@@ -2233,6 +2266,40 @@ mod tests {
         assert!(is_valid_codex_date(2024, 2, 29));
         assert!(!is_valid_codex_date(2026, 2, 29));
         assert!(!is_valid_codex_date(2026, 4, 31));
+
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn empty_session_dirs_are_removed_with_emptied_parents() {
+        let unique = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let root = std::env::temp_dir().join(format!(
+            "ai-session-viewer-codex-remove-empty-{}-{unique}",
+            std::process::id()
+        ));
+        // Fully empty old year: day, month and year all go.
+        fs::create_dir_all(root.join("2020").join("01").join("05")).unwrap();
+        // Rollout, invalid date and non-date directories stay.
+        let kept_day = root.join("2021").join("02").join("03");
+        fs::create_dir_all(&kept_day).unwrap();
+        fs::write(kept_day.join("rollout.jsonl"), "data").unwrap();
+        fs::create_dir_all(root.join("2021").join("02").join("30")).unwrap();
+        fs::create_dir_all(root.join("2021").join("02").join("notes")).unwrap();
+        // Active month: the empty day goes, its parents stay.
+        fs::create_dir_all(root.join("2022").join("03").join("04")).unwrap();
+
+        let removed = remove_empty_session_dirs(&root, 0, &[(2022, 3)]);
+
+        assert_eq!(removed, 4);
+        assert!(!root.join("2020").exists());
+        assert!(kept_day.join("rollout.jsonl").exists());
+        assert!(root.join("2021").join("02").join("30").exists());
+        assert!(root.join("2021").join("02").join("notes").exists());
+        assert!(!root.join("2022").join("03").join("04").exists());
+        assert!(root.join("2022").join("03").exists());
 
         fs::remove_dir_all(root).unwrap();
     }

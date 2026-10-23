@@ -173,7 +173,7 @@ export function RecyclebinPage() {
               disabled={scanLoading}
               className="flex items-center gap-1.5 px-3 py-1.5 text-xs rounded-md border border-border text-foreground hover:bg-accent/50 transition-colors disabled:opacity-50"
               title={source === "codex"
-                ? t("扫描 Codex 会话目录中的空目录并移入回收站")
+                ? t("扫描并删除 Codex 会话目录中的空日期目录")
                 : t("扫描所有项目中的孤儿 UUID 目录并移入回收站")}
             >
               {scanLoading
@@ -196,7 +196,11 @@ export function RecyclebinPage() {
         {scanResult !== null && (
           <div className="mb-2 flex items-center gap-1.5 text-xs text-success">
             <ScanLine className="w-3.5 h-3.5" />
-            {scanResult === 0 ? t("未发现孤儿目录") : t("已将 {{v0}} 个孤儿目录移入回收站", { v0: scanResult })}
+            {scanResult === 0
+              ? t("未发现孤儿目录")
+              : source === "codex"
+                ? t("已删除 {{v0}} 个空目录", { v0: scanResult })
+                : t("已将 {{v0}} 个孤儿目录移入回收站", { v0: scanResult })}
             <button onClick={() => setScanResult(null)} className="ml-1 opacity-60 hover:opacity-100">×</button>
           </div>
         )}

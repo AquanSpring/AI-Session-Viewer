@@ -56,6 +56,14 @@ pub fn start_watcher(app_handle: AppHandle) -> Result<(), String> {
             for event in events {
                 match event {
                     Ok(event) => {
+                        if event.kind.is_remove() {
+                            forget_removed_roots(
+                                &mut watcher,
+                                &directories,
+                                &mut watched,
+                                &event.paths,
+                            );
+                        }
                         changed.extend(
                             event
                                 .paths
@@ -174,6 +182,26 @@ fn sync_watches(
     }
 }
 
+/// A deleted root takes its watch with it (inotify drops the watch). If the
+/// root is recreated before the next refresh, `exists()` alone would keep it
+/// marked as watched, so forget it here and let `sync_watches` re-register.
+fn forget_removed_roots(
+    watcher: &mut RecommendedWatcher,
+    directories: &[&Option<PathBuf>; 4],
+    watched: &mut [bool; 4],
+    removed: &[PathBuf],
+) {
+    for (index, directory) in directories.iter().enumerate() {
+        let Some(directory) = directory else {
+            continue;
+        };
+        if watched[index] && removed.iter().any(|path| path == directory) {
+            let _ = watcher.unwatch(directory);
+            watched[index] = false;
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -199,6 +227,42 @@ mod tests {
         assert!(!watched[0]);
 
         fs::create_dir_all(&directory).unwrap();
+        sync_watches(&mut watcher, &directories.each_ref(), &mut watched);
+        assert!(watched[0]);
+
+        drop(watcher);
+        fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
+    fn rewatches_provider_root_recreated_before_refresh() {
+        let unique = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let directory = std::env::temp_dir().join(format!(
+            "ai-session-viewer-watch-recreated-root-{}-{unique}",
+            std::process::id()
+        ));
+        fs::create_dir_all(&directory).unwrap();
+        let directories = [Some(directory.clone()), None, None, None];
+        let mut watched = [false; 4];
+        let (tx, _rx) = mpsc::channel::<notify::Result<Event>>();
+        let mut watcher = RecommendedWatcher::new(tx, Config::default()).unwrap();
+
+        sync_watches(&mut watcher, &directories.each_ref(), &mut watched);
+        assert!(watched[0]);
+
+        fs::remove_dir_all(&directory).unwrap();
+        fs::create_dir_all(&directory).unwrap();
+        forget_removed_roots(
+            &mut watcher,
+            &directories.each_ref(),
+            &mut watched,
+            std::slice::from_ref(&directory),
+        );
+        assert!(!watched[0]);
+
         sync_watches(&mut watcher, &directories.each_ref(), &mut watched);
         assert!(watched[0]);
 

@@ -114,7 +114,7 @@ fn delete_session_sync(
             } else if source == "codex" {
                 let metadata = codex::extract_session_meta(&path)
                     .ok_or_else(|| "Failed to read Codex session metadata".to_string())?;
-                if metadata.id != session_id {
+                if !session_id.is_empty() && metadata.id != session_id {
                     return Err(
                         "Session id does not match the requested Codex session file".to_string()
                     );
