@@ -41,8 +41,18 @@ pub async fn rebuild_projects_cache(source: String) -> Result<Vec<ProjectEntry>,
     .map_err(|error| format!("项目缓存重建任务失败: {error}"))?
 }
 
-#[tauri::command(async)]
-pub fn delete_project(
+#[tauri::command]
+pub async fn delete_project(
+    source: String,
+    project_id: String,
+    level: DeleteLevel,
+) -> Result<DeleteResult, String> {
+    tauri::async_runtime::spawn_blocking(move || delete_project_sync(source, project_id, level))
+        .await
+        .map_err(|error| format!("项目删除任务失败: {error}"))?
+}
+
+fn delete_project_sync(
     source: String,
     project_id: String,
     level: DeleteLevel,

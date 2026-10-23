@@ -78,12 +78,14 @@ export function SessionsPage() {
   const project = projects.find((p) => p.id === projectId);
   const [deleteTarget, setDeleteTarget] = useState<string | null>(null);
   const [deleteTargetSessionId, setDeleteTargetSessionId] = useState<string | null>(null);
+  const [deleteError, setDeleteError] = useState<string | null>(null);
   const [deleting, setDeleting] = useState(false);
   const [editingSession, setEditingSession] = useState<string | null>(null);
   const [cloningSession, setCloningSession] = useState<SessionIndexEntry | null>(null);
 
   const [showCleanDialog, setShowCleanDialog] = useState(false);
   const [cleanSelected, setCleanSelected] = useState<Set<string>>(new Set());
+  const [cleanError, setCleanError] = useState<string | null>(null);
   const [cleaning, setCleaning] = useState(false);
 
   // 多选模式（批量导出 / 批量删除）
@@ -91,6 +93,7 @@ export function SessionsPage() {
   const [selected, setSelected] = useState<Set<string>>(new Set()); // by filePath
   const [batchBusy, setBatchBusy] = useState(false);
   const [batchDeleteOpen, setBatchDeleteOpen] = useState(false);
+  const [batchDeleteError, setBatchDeleteError] = useState<string | null>(null);
   // 单会话导出格式浮层
   const [exportMenu, setExportMenu] = useState<{ session: SessionIndexEntry; rect: DOMRect } | null>(null);
   // 批量导出格式浮层
@@ -128,14 +131,16 @@ export function SessionsPage() {
   const handleDelete = async () => {
     if (!deleteTarget) return;
     setDeleting(true);
+    setDeleteError(null);
     try {
       await deleteSession(deleteTarget, deleteTargetSessionId || undefined);
-    } catch (err) {
-      console.error("Failed to delete session:", err);
-    } finally {
-      setDeleting(false);
       setDeleteTarget(null);
       setDeleteTargetSessionId(null);
+    } catch (err) {
+      console.error("Failed to delete session:", err);
+      setDeleteError(err instanceof Error ? err.message : String(err));
+    } finally {
+      setDeleting(false);
     }
   };
 
@@ -287,16 +292,20 @@ export function SessionsPage() {
   const handleBatchDelete = async () => {
     if (selectedSessions.length === 0) return;
     setBatchBusy(true);
+    setBatchDeleteError(null);
     try {
-      await Promise.all(
+      const results = await Promise.allSettled(
         selectedSessions.map((s) => deleteSession(s.filePath, s.sessionId)),
       );
+      const failed = results.find((result) => result.status === "rejected");
+      if (failed?.status === "rejected") throw failed.reason;
       exitSelectMode();
+      setBatchDeleteOpen(false);
     } catch (err) {
       console.error("Failed to batch delete sessions:", err);
+      setBatchDeleteError(err instanceof Error ? err.message : String(err));
     } finally {
       setBatchBusy(false);
-      setBatchDeleteOpen(false);
     }
   };
 
@@ -319,6 +328,7 @@ export function SessionsPage() {
             <button
               onClick={() => {
                 setCleanSelected(new Set(emptySessions.map((s) => s.filePath)));
+                setCleanError(null);
                 setShowCleanDialog(true);
               }}
               className="toolbar-button hover:text-destructive"
@@ -625,6 +635,7 @@ export function SessionsPage() {
                       e.stopPropagation();
                       setDeleteTarget(session.filePath);
                       setDeleteTargetSessionId(session.sessionId);
+                      setDeleteError(null);
                     }}
                     className="p-1.5 text-xs text-muted-foreground rounded-md hover:bg-destructive/10 hover:text-destructive transition-colors"
                     title={t("删除此会话")}
@@ -651,11 +662,13 @@ export function SessionsPage() {
             <h3 className="text-lg font-semibold mb-2">{t("确认删除")}</h3>
             <p className="text-sm text-muted-foreground mb-4">
               {t("确定要删除此会话吗？会话将移入回收站，可在回收站中恢复。")}</p>
+            {deleteError && <p className="mb-4 text-sm text-destructive">{deleteError}</p>}
             <div className="flex justify-end gap-2">
               <button
                 onClick={() => {
                   setDeleteTarget(null);
                   setDeleteTargetSessionId(null);
+                  setDeleteError(null);
                 }}
                 disabled={deleting}
                 className="px-4 py-2 text-sm rounded-md border border-border hover:bg-accent transition-colors"
@@ -703,6 +716,7 @@ export function SessionsPage() {
             <h3 className="text-lg font-semibold mb-1">{t("清理空会话")}</h3>
             <p className="text-sm text-muted-foreground mb-4">
               {t("以下会话没有消息记录，选择后点击删除。")}</p>
+            {cleanError && <p className="mb-4 text-sm text-destructive">{cleanError}</p>}
             <div className="space-y-1 max-h-60 overflow-y-auto mb-4">
               {emptySessions.map((s) => (
                 <label
@@ -746,7 +760,10 @@ export function SessionsPage() {
               </button>
               <div className="flex gap-2">
                 <button
-                  onClick={() => setShowCleanDialog(false)}
+                  onClick={() => {
+                    setShowCleanDialog(false);
+                    setCleanError(null);
+                  }}
                   disabled={cleaning}
                   className="px-4 py-2 text-sm rounded-md border border-border hover:bg-accent transition-colors"
                 >
@@ -755,19 +772,23 @@ export function SessionsPage() {
                   onClick={async () => {
                     if (cleanSelected.size === 0) return;
                     setCleaning(true);
+                    setCleanError(null);
                     try {
                       const targets = emptySessions.filter((s) => cleanSelected.has(s.filePath));
-                      await Promise.all(
+                      const results = await Promise.allSettled(
                         targets.map((s) => deleteSession(s.filePath, s.sessionId))
                       );
+                      const failed = results.find((result) => result.status === "rejected");
+                      if (failed?.status === "rejected") throw failed.reason;
                       // selectProject 会重读全分类并自动重填 sessions + invalidSessions
                       await selectProject(projectId);
-                    } catch (err) {
-                      console.error("Failed to clean sessions:", err);
-                    } finally {
-                      setCleaning(false);
                       setShowCleanDialog(false);
                       setCleanSelected(new Set());
+                    } catch (err) {
+                      console.error("Failed to clean sessions:", err);
+                      setCleanError(err instanceof Error ? err.message : String(err));
+                    } finally {
+                      setCleaning(false);
                     }
                   }}
                   disabled={cleaning || cleanSelected.size === 0}
@@ -805,7 +826,10 @@ export function SessionsPage() {
             <Download className="w-3.5 h-3.5" />
             {t("导出")}</button>
           <button
-            onClick={() => setBatchDeleteOpen(true)}
+            onClick={() => {
+              setBatchDeleteError(null);
+              setBatchDeleteOpen(true);
+            }}
             disabled={batchBusy || selectedSessions.length === 0}
             className="text-xs px-3 py-1.5 rounded-md bg-destructive text-destructive-foreground hover:bg-destructive/90 transition-colors flex items-center gap-1.5 disabled:opacity-50"
           >
@@ -846,9 +870,13 @@ export function SessionsPage() {
             <h3 className="text-lg font-semibold mb-2">{t("批量删除会话")}</h3>
             <p className="text-sm text-muted-foreground mb-4">
               {t("将删除选中的{{v0}} 个会话（移入回收站，可在回收站还原）。", { v0: selectedSessions.length })}</p>
+            {batchDeleteError && <p className="mb-4 text-sm text-destructive">{batchDeleteError}</p>}
             <div className="flex justify-end gap-2">
               <button
-                onClick={() => setBatchDeleteOpen(false)}
+                onClick={() => {
+                  setBatchDeleteOpen(false);
+                  setBatchDeleteError(null);
+                }}
                 disabled={batchBusy}
                 className="px-4 py-2 text-sm rounded-md border border-border hover:bg-accent transition-colors"
               >

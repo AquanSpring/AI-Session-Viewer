@@ -24,7 +24,6 @@ pub struct SessionsQuery {
     pub project_id: String,
 }
 
-
 pub async fn get_sessions(
     Query(params): Query<SessionsQuery>,
 ) -> Result<Json<Vec<SessionIndexEntry>>, (StatusCode, String)> {
@@ -172,8 +171,8 @@ pub async fn delete_session(
                 )
             })?;
 
-            if let Some(ref pid) = project_id {
-                if session_meta.cwd != *pid {
+            if let Some(pid) = project_id.as_deref().filter(|pid| !pid.is_empty()) {
+                if codex::project_id_for_session(&resolved_path).as_deref() != Some(pid) {
                     return Err((
                         StatusCode::BAD_REQUEST,
                         "Session file does not belong to the requested Codex project".to_string(),

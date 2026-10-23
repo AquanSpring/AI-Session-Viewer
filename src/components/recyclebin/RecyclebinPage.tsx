@@ -74,6 +74,7 @@ function ReasonBadge({ reason }: { reason: string }) {
 export function RecyclebinPage() {
   const { t } = useTranslation();
   const {
+    source,
     recycledItems,
     recyclebinLoading,
     loadRecycledItems,
@@ -83,7 +84,7 @@ export function RecyclebinPage() {
     cleanupOrphanDirs,
     timeZone,
   } = useAppStore(
-    useShallow((state) => ({ recycledItems: state.recycledItems, recyclebinLoading: state.recyclebinLoading, loadRecycledItems: state.loadRecycledItems, restoreItem: state.restoreItem, permanentlyDeleteItem: state.permanentlyDeleteItem, emptyRecyclebin: state.emptyRecyclebin, cleanupOrphanDirs: state.cleanupOrphanDirs, timeZone: state.timeZone })),
+    useShallow((state) => ({ source: state.source, recycledItems: state.recycledItems, recyclebinLoading: state.recyclebinLoading, loadRecycledItems: state.loadRecycledItems, restoreItem: state.restoreItem, permanentlyDeleteItem: state.permanentlyDeleteItem, emptyRecyclebin: state.emptyRecyclebin, cleanupOrphanDirs: state.cleanupOrphanDirs, timeZone: state.timeZone })),
   );
 
   const [typeFilter, setTypeFilter] = useState<TypeFilter>("all");
@@ -167,17 +168,19 @@ export function RecyclebinPage() {
           </div>
           <div className="flex items-center gap-2">
             {/* 扫描孤儿目录 */}
-            <button
+            {(source === "claude" || source === "codex") && <button
               onClick={handleScanOrphanDirs}
               disabled={scanLoading}
               className="flex items-center gap-1.5 px-3 py-1.5 text-xs rounded-md border border-border text-foreground hover:bg-accent/50 transition-colors disabled:opacity-50"
-              title={t("扫描所有项目中的孤儿 UUID 目录并移入回收站")}
+              title={source === "codex"
+                ? t("扫描 Codex 会话目录中的空目录并移入回收站")
+                : t("扫描所有项目中的孤儿 UUID 目录并移入回收站")}
             >
               {scanLoading
                 ? <Loader2 className="w-3.5 h-3.5 animate-spin" />
                 : <ScanLine className="w-3.5 h-3.5" />
               }
-              {t("扫描孤儿目录")}</button>
+              {t("扫描孤儿目录")}</button>}
             {recycledItems.length > 0 && (
               <button
                 onClick={() => setConfirmEmpty(true)}

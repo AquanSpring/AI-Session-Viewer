@@ -148,7 +148,15 @@ pub fn move_to_recyclebin(
 
     let mut manifest = load_manifest();
     manifest.items.push(item);
-    save_manifest(&manifest)?;
+    if let Err(error) = save_manifest(&manifest) {
+        let rollback = move_path_no_replace(&target, original_path);
+        return match rollback {
+            Ok(()) => Err(format!("Failed to record recyclebin item: {error}")),
+            Err(rollback_error) => Err(format!(
+                "Failed to record recyclebin item: {error}; failed to restore original path: {rollback_error}; file remains at {target:?}"
+            )),
+        };
+    }
 
     Ok(id)
 }
@@ -236,14 +244,12 @@ pub fn move_group_to_recyclebin(
             _ => index.to_string(),
         };
         if let Err(error) = move_path(original, &group_dir.join(&stored_name)) {
-            let rollback = rollback_group(&group_dir, &members);
-            let _ = fs::remove_dir_all(&group_dir);
-            return Err(match rollback {
-                Ok(()) => format!("Failed to move {original:?} to recyclebin: {error}"),
-                Err(rollback_error) => format!(
-                    "Failed to move {original:?} to recyclebin: {error}; rollback failed: {rollback_error}"
-                ),
-            });
+            let operation_error = format!("Failed to move {original:?} to recyclebin: {error}");
+            return Err(rollback_group_after_failure(
+                &group_dir,
+                &members,
+                operation_error,
+            ));
         }
         members.push(RecycledMember {
             original_path: original.to_string_lossy().to_string(),
@@ -269,18 +275,37 @@ pub fn move_group_to_recyclebin(
     let mut manifest = load_manifest();
     manifest.items.push(item.clone());
     if let Err(error) = save_manifest(&manifest) {
-        let _ = rollback_group(&group_dir, &item.members);
-        let _ = fs::remove_dir_all(&group_dir);
-        return Err(format!("Failed to record recyclebin group: {error}"));
+        let operation_error = format!("Failed to record recyclebin group: {error}");
+        return Err(rollback_group_after_failure(
+            &group_dir,
+            &item.members,
+            operation_error,
+        ));
     }
     Ok(id)
+}
+
+fn rollback_group_after_failure(
+    group_dir: &std::path::Path,
+    members: &[RecycledMember],
+    operation_error: String,
+) -> String {
+    match rollback_group(group_dir, members) {
+        Ok(()) => {
+            let _ = fs::remove_dir_all(group_dir);
+            operation_error
+        }
+        Err(rollback_error) => format!(
+            "{operation_error}; rollback failed: {rollback_error}; files remain in {group_dir:?}"
+        ),
+    }
 }
 
 /// Put every already-moved group member back where it came from.
 fn rollback_group(group_dir: &std::path::Path, members: &[RecycledMember]) -> Result<(), String> {
     let mut errors = Vec::new();
     for member in members.iter().rev() {
-        if let Err(error) = move_path(
+        if let Err(error) = move_path_no_replace(
             &group_dir.join(&member.stored_name),
             std::path::Path::new(&member.original_path),
         ) {
@@ -316,7 +341,7 @@ fn restore_group(item: &RecycledItem, items_dir: &std::path::Path) -> Result<(),
             .and_then(|()| restore_path(&group_dir.join(&member.stored_name), &original));
         if let Err(error) = result {
             for done in restored.iter().rev() {
-                let _ = move_path(
+                let _ = move_path_no_replace(
                     std::path::Path::new(&done.original_path),
                     &group_dir.join(&done.stored_name),
                 );
@@ -385,11 +410,11 @@ pub fn move_omp_session_to_recyclebin(
         (artifact_path.as_ref(), companion_stored_path.as_ref())
     {
         if let Err(error) = move_path(artifact_path, companion_stored_path) {
-            let rollback = move_path(&stored_path, session_path);
+            let rollback = move_path_no_replace(&stored_path, session_path);
             return match rollback {
                 Ok(()) => Err(format!("Failed to move OMP session artifacts to recyclebin: {error}")),
                 Err(rollback_error) => Err(format!(
-                    "Failed to move OMP session artifacts to recyclebin: {error}; failed to restore session file: {rollback_error}"
+                    "Failed to move OMP session artifacts to recyclebin: {error}; failed to restore session file: {rollback_error}; session remains at {stored_path:?}"
                 )),
             };
         }
@@ -423,14 +448,14 @@ pub fn move_omp_session_to_recyclebin(
                 rollback_errors.push(rollback_error.to_string());
             }
         }
-        if let Err(rollback_error) = move_path(&stored_path, session_path) {
+        if let Err(rollback_error) = move_path_no_replace(&stored_path, session_path) {
             rollback_errors.push(rollback_error.to_string());
         }
         if rollback_errors.is_empty() {
             return Err(format!("Failed to record OMP recyclebin item: {error}"));
         }
         return Err(format!(
-            "Failed to record OMP recyclebin item: {error}; rollback failed: {}",
+            "Failed to record OMP recyclebin item: {error}; rollback failed: {}; remaining files are in {items_dir:?}",
             rollback_errors.join("; ")
         ));
     }
@@ -560,6 +585,22 @@ fn move_path(source: &std::path::Path, destination: &std::path::Path) -> std::io
     }
 }
 
+fn move_path_no_replace(
+    source: &std::path::Path,
+    destination: &std::path::Path,
+) -> std::io::Result<()> {
+    match fs::symlink_metadata(destination) {
+        Ok(_) => Err(std::io::Error::new(
+            std::io::ErrorKind::AlreadyExists,
+            "destination already exists",
+        )),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            move_path(source, destination)
+        }
+        Err(error) => Err(error),
+    }
+}
+
 fn copy_path(src: &std::path::Path, dst: &std::path::Path) -> std::io::Result<()> {
     if src.is_dir() {
         fs::create_dir_all(dst)?;
@@ -627,21 +668,76 @@ pub fn empty_recyclebin() -> Result<usize, String> {
 
     for item in &manifest.items {
         let stored_path = items_dir.join(&item.stored_name);
-        if stored_path.exists() {
-            if stored_path.is_dir() {
-                let _ = fs::remove_dir_all(&stored_path);
-            } else {
-                let _ = fs::remove_file(&stored_path);
-            }
+        if fs::symlink_metadata(&stored_path).is_ok() {
+            remove_path(&stored_path)
+                .map_err(|error| format!("Failed to delete stored item: {error}"))?;
         }
         if let Some(companion_stored_name) = &item.companion_stored_name {
             let companion_stored_path = items_dir.join(companion_stored_name);
-            if companion_stored_path.exists() {
-                let _ = remove_path(&companion_stored_path);
+            if fs::symlink_metadata(&companion_stored_path).is_ok() {
+                remove_path(&companion_stored_path)
+                    .map_err(|error| format!("Failed to delete stored companion: {error}"))?;
             }
         }
     }
 
     save_manifest(&RecyclebinManifest::default())?;
     Ok(count)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    #[test]
+    fn failed_group_rollback_preserves_unrestored_files() {
+        let unique = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let root = std::env::temp_dir().join(format!(
+            "ai-session-viewer-recyclebin-rollback-{}-{unique}",
+            std::process::id()
+        ));
+        let group_dir = root.join("group");
+        let stored = group_dir.join("0.jsonl");
+        let original = root.join("original");
+        fs::create_dir_all(&group_dir).unwrap();
+        fs::create_dir_all(&original).unwrap();
+        fs::write(&stored, "preserve me").unwrap();
+
+        let member = RecycledMember {
+            original_path: original.to_string_lossy().to_string(),
+            stored_name: "0.jsonl".to_string(),
+        };
+        let error =
+            rollback_group_after_failure(&group_dir, &[member], "operation failed".to_string());
+
+        assert!(error.contains("files remain in"));
+        assert_eq!(fs::read_to_string(stored).unwrap(), "preserve me");
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn move_path_no_replace_keeps_existing_destination() {
+        let unique = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let root = std::env::temp_dir().join(format!(
+            "ai-session-viewer-recyclebin-no-replace-{}-{unique}",
+            std::process::id()
+        ));
+        fs::create_dir_all(&root).unwrap();
+        let source = root.join("source");
+        let destination = root.join("destination");
+        fs::write(&source, "source").unwrap();
+        fs::write(&destination, "destination").unwrap();
+
+        assert!(move_path_no_replace(&source, &destination).is_err());
+        assert_eq!(fs::read_to_string(source).unwrap(), "source");
+        assert_eq!(fs::read_to_string(destination).unwrap(), "destination");
+        fs::remove_dir_all(root).unwrap();
+    }
 }
