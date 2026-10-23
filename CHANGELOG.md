@@ -6,6 +6,10 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/), and this
 
 ## [Unreleased]
 
+---
+
+## [3.2.0] - 2026-10-23
+
 ### Changed
 
 - 删除 Codex 项目时，项目下的会话作为一条分组记录移入回收站（与 Grok / Oh My Pi 一致），可整体还原或彻底删除；任一会话移动失败时整体回滚，不再部分删除。
@@ -15,6 +19,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/), and this
 - Linux 续聊可正确向 xterm 传递命令参数，并支持 GNOME Console（`kgx`）；应用启动时会话目录尚不存在时，文件监听器会在目录创建后自动注册监听；会话目录被删除后重建时也会重新注册监听。
 - 回收站「扫描孤儿目录」支持 Codex：直接删除 rollout 归档或删除后遗留的空日期目录（含随之变空的年、月目录，当月目录保留），空目录不占用回收站条目；桌面端与 Web 端均可使用。
 - 修复 Codex 会话删除时的项目校验（Web 端此前无法删除 Codex Desktop 直接对话等虚拟项目下的会话），校验只读取会话头部，不再完整扫描会话文件；加强回收站移动失败后的回滚保护；删除失败时保留对话框并显示错误，避免误以为删除成功。
+- 桌面端删除会话 / 项目、回收站还原 / 清空 / 扫描等文件操作改在后台线程执行，处理大量文件时界面保持响应。
 
 ### 致谢
 

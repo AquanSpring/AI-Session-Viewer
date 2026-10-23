@@ -30,7 +30,7 @@ Session cards show the first prompt or alias, message count, branch, and creatio
 - Add aliases and tags, filter by tags, and bookmark entire sessions or individual messages.
 - Claude aliases synchronize with Claude Code's `/rename`.
 - Review empty or corrupt sessions in the invalid-items page before deleting them. Deletion moves sessions to the recycle bin on both desktop and web.
-- The recycle bin supports restoring original paths, removing orphan directories, and permanent deletion after confirmation. Deleting a whole Oh My Pi or Grok project creates a single recycle-bin entry.
+- The recycle bin supports restoring original paths, removing orphan directories, and permanent deletion after confirmation. Deleting a whole Codex, Oh My Pi, or Grok project creates a single recycle-bin entry. The orphan-directory scan moves orphan Claude UUID directories to the recycle bin and deletes empty Codex date folders directly.
 
 ## Reading conversations
 
